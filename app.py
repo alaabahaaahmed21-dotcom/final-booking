@@ -1,1171 +1,1129 @@
-"""23rd ITKF World Championship hotel booking application."""
-
-from __future__ import annotations
-
-import base64
-import html
-import mimetypes
-from datetime import date, timedelta
-from typing import Any
-
 import streamlit as st
+import pandas as pd
+from datetime import date
+from pathlib import Path
+import requests
+import re
+import time
+import uuid
+import base64
+import json
+import io
+from PIL import Image
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 
-from config import (
-    BORDER_COLOR,
-    DEFAULT_COUNTRY_CODE,
-    EVENT_TITLE,
-    HEADER_BG_COLOR,
-    HOTELS,
-    LOGO_PATHS,
-    MAX_BOOKING_NIGHTS,
-    MAX_IMAGE_SIZE_MB,
-    REQUIRE_PASSPORT_PHOTO,
-    REQUIRE_PERSONAL_PHOTO,
-    ROOM_OCCUPANCY,
-    SYSTEM_TITLE,
-    TRANSPORT_PRICING_LABELS,
-    TRANSPORT_SERVICES,
-    TRANSPORTATION,
-)
-from countries import countries, countries_by_name, country_for_code, validate_phone
-from helpers import (
-    calculate_booking_totals,
-    calculate_nights,
-    current_timestamp,
-    format_currency,
-    generate_booking_id,
-    validate_booking,
-)
-from pdf_generator import generate_pdf
-from sheets import backend_is_configured, save_to_google_sheets
-from uploads import validate_uploaded_image
-
+# =========================================================
+# BOOKING / REGISTRATION APP
+# =========================================================
+# IMPORTANT:
+# 1) Put secrets in .streamlit/secrets.toml (never in this file).
+# 2) The Google Apps Script backend supplied with this project
+#    stores the registration, passport and invoice securely.
+#    Two backend actions are expected:
+#       - "check_duplicate"  -> {"ok": true, "exists": bool}
+#       - "create_booking"   -> {"ok": true, ...}
+#    (see the integration note above check_duplicate() below)
+# 3) Hotel prices below are INITIAL values from the supplied table.
+#    Edit only HOTEL_DATA / TRANSPORT_DATA when final prices arrive.
+# =========================================================
 
 st.set_page_config(
-    page_title=f"{EVENT_TITLE} - {SYSTEM_TITLE}",
-    page_icon="🏨",
+    page_title="Booking & Registration",
+    page_icon="🧾",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
 
-
-st.markdown(
-    f"""
-<style>
-:root {{color-scheme: only light !important;}}
-html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
-    color-scheme: light !important;
-    background-color:#FFFFFF !important; color:#1F2937 !important;
-}}
-.block-container {{padding-top: 1rem; max-width: 940px; padding-bottom: 2rem;}}
-#MainMenu, footer {{visibility: hidden;}}
-.itkf-header {{
-    background: {HEADER_BG_COLOR}; border: 2px solid {BORDER_COLOR};
-    border-radius: 0 0 18px 18px; padding: 18px; margin-bottom: 14px;
-    box-shadow: 0 1px 7px rgba(0,0,0,.10);
-}}
-.itkf-logos-row {{
-    display:flex; justify-content:center; align-items:center; gap:24px;
-    flex-wrap:wrap; margin:2px 0 12px;
-}}
-.itkf-logo {{width:88px; height:88px; object-fit:contain; display:block;}}
-.itkf-logo:first-child {{width:106px; height:106px;}}
-.itkf-event-title {{text-align:center; font-size:26px; font-weight:800; color:#222;}}
-.itkf-system-title {{text-align:center; font-size:15px; color:#666; margin-top:5px;}}
-.itkf-section-title {{font-size:25px; font-weight:750; color:#374151; margin:26px 0 6px;}}
-.itkf-section-help {{color:#6b7280; font-size:16px; margin-bottom:18px;}}
-.itkf-price-box {{
-    background:#fafafa; border:1px solid #e5e7eb; border-left:4px solid {BORDER_COLOR};
-    border-radius:10px; padding:14px 16px; margin-top:12px;
-}}
-.itkf-card {{border:1px solid #e5e7eb; border-radius:12px; padding:14px; margin:8px 0;}}
-/* Keep every app button readable even when the phone/browser forces Dark Mode. */
-[data-testid="stAppViewContainer"] button {{
-    color-scheme: only light !important;
-}}
-[data-testid="stAppViewContainer"] button:not([kind="primary"]):not([data-testid="baseButton-primary"]) {{
-    background:#FFFFFF !important;
-    background-image:none !important;
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-    border:1.5px solid #D1D5DB !important;
-    box-shadow:none !important;
-    opacity:1 !important;
-}}
-.stButton > button[kind="primary"],
-button[data-testid="baseButton-primary"],
-.stFormSubmitButton > button[kind="primary"] {{
-    background:{BORDER_COLOR} !important;
-    background-image:none !important;
-    color:#FFFFFF !important;
-    -webkit-text-fill-color:#FFFFFF !important;
-    border:1.5px solid {BORDER_COLOR} !important;
-    opacity:1 !important;
-}}
-[data-testid="stAppViewContainer"] button p,
-[data-testid="stAppViewContainer"] button span,
-[data-testid="stAppViewContainer"] button svg {{
-    color:inherit !important;
-    -webkit-text-fill-color:inherit !important;
-}}
-[data-testid="stAppViewContainer"] button:not(:disabled):hover {{
-    border-color:{BORDER_COLOR} !important;
-}}
-[data-testid="stAppViewContainer"] button:disabled {{
-    background:#F3F4F6 !important;
-    background-image:none !important;
-    color:#6B7280 !important;
-    -webkit-text-fill-color:#6B7280 !important;
-    border-color:#D1D5DB !important;
-    opacity:1 !important;
-}}
-
-/* Force every form label, hint and field to stay light and readable. */
-[data-testid="stAppViewContainer"] label,
-[data-testid="stAppViewContainer"] label *,
-[data-testid="stWidgetLabel"],
-[data-testid="stWidgetLabel"] *,
-[data-testid="stInputInstructions"],
-[data-testid="stInputInstructions"] * {{
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-    opacity:1 !important;
-}}
-
-[data-testid="stAppViewContainer"] input:not([type="checkbox"]):not([type="radio"]),
-[data-testid="stAppViewContainer"] textarea,
-[data-testid="stAppViewContainer"] [role="combobox"],
-[data-baseweb="input"],
-[data-baseweb="base-input"],
-[data-baseweb="textarea"],
-[data-baseweb="select"] > div {{
-    color-scheme: only light !important;
-    background-color:#FFFFFF !important;
-    background-image:none !important;
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-    opacity:1 !important;
-}}
-
-/* One thin border on the outer field only; inner input stays borderless. */
-[data-baseweb="input"],
-[data-baseweb="textarea"],
-[data-baseweb="select"] > div {{
-    border:1px solid #D1D5DB !important;
-    box-shadow:none !important;
-}}
-[data-baseweb="base-input"],
-[data-testid="stAppViewContainer"] input:not([type="checkbox"]):not([type="radio"]),
-[data-testid="stAppViewContainer"] textarea {{
-    border:0 !important;
-    outline:0 !important;
-    box-shadow:none !important;
-}}
-[data-baseweb="input"]:focus-within,
-[data-baseweb="textarea"]:focus-within,
-[data-baseweb="select"] > div:focus-within {{
-    border-color:{BORDER_COLOR} !important;
-    box-shadow:0 0 0 1px rgba(200,16,46,.12) !important;
-}}
-
-[data-baseweb="select"] > div *,
-[data-baseweb="input"] svg,
-[data-baseweb="textarea"] svg {{
-    color:#1F2937 !important;
-    fill:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-}}
-
-[data-testid="stAppViewContainer"] input::placeholder,
-[data-testid="stAppViewContainer"] textarea::placeholder {{
-    color:#6B7280 !important;
-    -webkit-text-fill-color:#6B7280 !important;
-    opacity:1 !important;
-}}
-
-[data-baseweb="input"]:has(input:disabled),
-[data-baseweb="base-input"]:has(input:disabled),
-[data-testid="stAppViewContainer"] input:disabled {{
-    background-color:#F3F4F6 !important;
-    color:#4B5563 !important;
-    -webkit-text-fill-color:#4B5563 !important;
-    opacity:1 !important;
-}}
-
-/* Light unchecked box and federation-red checked box. */
-[data-testid="stCheckbox"] input[type="checkbox"] {{
-    color-scheme: only light !important;
-    accent-color:{BORDER_COLOR} !important;
-}}
-[data-testid="stCheckbox"] input[type="checkbox"] + div {{
-    background-color:#FFFFFF !important;
-    background-image:none !important;
-    border:1px solid #9CA3AF !important;
-    box-shadow:none !important;
-}}
-[data-testid="stCheckbox"] input[type="checkbox"]:checked + div {{
-    background-color:{BORDER_COLOR} !important;
-    border-color:{BORDER_COLOR} !important;
-}}
-[data-testid="stCheckbox"] input[type="checkbox"]:checked + div svg {{
-    color:#FFFFFF !important;
-    fill:#FFFFFF !important;
-}}
-
-[data-testid="stFileUploader"] section,
-[data-testid="stFileUploaderDropzone"] {{
-    color-scheme: only light !important;
-    background-color:#F8FAFC !important;
-    background-image:none !important;
-    color:#1F2937 !important;
-    border-color:#D1D5DB !important;
-}}
-[data-testid="stFileUploader"] section *,
-[data-testid="stFileUploaderDropzone"] * {{
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-}}
-
-/* Alert text must stay visible inside warning/info/success/error boxes. */
-[data-testid="stAlert"],
-[data-testid="stAlert"] *,
-[data-testid="stAlert"] p,
-[data-testid="stAlert"] span {{
-    color-scheme: only light !important;
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-    opacity:1 !important;
-}}
-[data-testid="stAlert"] svg {{
-    color:#1F2937 !important;
-    fill:#1F2937 !important;
-}}
-
-[data-baseweb="popover"],
-[data-baseweb="menu"],
-[data-baseweb="calendar"],
-[role="listbox"],
-[role="option"] {{
-    color-scheme: only light !important;
-    background-color:#FFFFFF !important;
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-}}
-[role="option"]:hover,
-[role="option"][aria-selected="true"] {{
-    background-color:#F3F4F6 !important;
-}}
-
-input[type="date"]::-webkit-calendar-picker-indicator {{
-    color-scheme: only light !important;
-    opacity:1 !important;
-}}
-
-div[data-testid="stHorizontalBlock"] .stButton > button {{min-height:44px; font-size:14px;}}
-@media (prefers-color-scheme: dark) {{
-    [data-testid="stAppViewContainer"] button:not([kind="primary"]):not([data-testid="baseButton-primary"]) {{
-        background:#FFFFFF !important;
-        background-image:none !important;
-        color:#1F2937 !important;
-        -webkit-text-fill-color:#1F2937 !important;
-    }}
-    [data-baseweb="input"],
-    [data-baseweb="base-input"],
-    [data-baseweb="textarea"],
-    [data-baseweb="select"] > div,
-    [data-testid="stAppViewContainer"] input,
-    [data-testid="stAppViewContainer"] textarea {{
-        background-color:#FFFFFF !important;
-        background-image:none !important;
-        color:#1F2937 !important;
-        -webkit-text-fill-color:#1F2937 !important;
-    }}
-}}
-
-/* Final mobile override: keep the latest fixes authoritative over browser auto-darkening. */
-div[data-testid="stTextInput"] div[data-baseweb="input"],
-div[data-testid="stNumberInput"] div[data-baseweb="input"],
-div[data-testid="stDateInput"] div[data-baseweb="input"],
-div[data-testid="stTextArea"] div[data-baseweb="textarea"],
-div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
-    color-scheme: only light !important;
-    background:#FFFFFF !important;
-    background-image:none !important;
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-    border-width:1px !important;
-    border-style:solid !important;
-    border-color:#D1D5DB !important;
-    box-shadow:none !important;
-}}
-div[data-testid="stTextInput"] div[data-baseweb="base-input"],
-div[data-testid="stNumberInput"] div[data-baseweb="base-input"],
-div[data-testid="stDateInput"] div[data-baseweb="base-input"],
-div[data-testid="stTextArea"] div[data-baseweb="base-input"] {{
-    border:0 !important;
-    box-shadow:none !important;
-}}
-div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child,
-div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child > div,
-div[data-testid="stCheckbox"] input[type="checkbox"] + div {{
-    color-scheme: only light !important;
-    background:#FFFFFF !important;
-    background-image:none !important;
-    border:1px solid #9CA3AF !important;
-    box-shadow:none !important;
-}}
-div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child:has(input:checked),
-div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child:has(input:checked) > div,
-div[data-testid="stCheckbox"] input[type="checkbox"]:checked + div {{
-    background:{BORDER_COLOR} !important;
-    border-color:{BORDER_COLOR} !important;
-}}
-div[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
-div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] *,
-div[data-testid="stAlert"] p,
-div[data-testid="stAlert"] span {{
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-    opacity:1 !important;
-    visibility:visible !important;
-}}
-
-/* Streamlit widgets that use their own dark-mode surfaces. */
-div[data-testid="stExpander"] details,
-div[data-testid="stExpander"] summary {{
-    color-scheme: only light !important;
-    background:#FFFFFF !important;
-    background-image:none !important;
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-}}
-div[data-testid="stExpander"] summary *,
-div[data-testid="stExpander"] details p {{
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-}}
-div[data-testid="stExpander"] details a {{
-    color:#0284C7 !important;
-    -webkit-text-fill-color:#0284C7 !important;
-}}
-
-div[data-testid="stRadio"] input[type="radio"] {{
-    color-scheme: only light !important;
-    accent-color:{BORDER_COLOR} !important;
-}}
-div[data-testid="stRadio"] input[type="radio"] + div,
-div[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-of-type {{
-    background:#FFFFFF !important;
-    background-image:none !important;
-    border-color:#9CA3AF !important;
-    box-shadow:inset 0 0 0 20px #FFFFFF !important;
-}}
-div[data-testid="stRadio"] input[type="radio"]:checked + div,
-div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) > div:first-of-type {{
-    background:{BORDER_COLOR} !important;
-    border-color:{BORDER_COLOR} !important;
-    box-shadow:inset 0 0 0 20px {BORDER_COLOR} !important;
-}}
-div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) > div:first-of-type > div {{
-    background:#FFFFFF !important;
-}}
-
-div[data-testid="stDateInput"] div[data-baseweb="input"],
-div[data-testid="stDateInput"] div[data-baseweb="base-input"],
-div[data-testid="stDateInput"] input,
-div[data-testid*="DateInput"] div[data-baseweb="input"],
-div[data-testid*="DateInput"] input {{
-    color-scheme: only light !important;
-    forced-color-adjust:none !important;
-    background-color:#FFFFFF !important;
-    background-image:none !important;
-    color:#1F2937 !important;
-    -webkit-text-fill-color:#1F2937 !important;
-    box-shadow:inset 0 0 0 1000px #FFFFFF !important;
-    -webkit-box-shadow:inset 0 0 0 1000px #FFFFFF !important;
-}}
-
-div[data-testid="stWidgetLabel"] button,
-div[data-testid="stTooltipIcon"] button,
-button[data-testid="stTooltipIcon"] {{
-    color-scheme: only light !important;
-    background:transparent !important;
-    background-image:none !important;
-    color:#6B7280 !important;
-    -webkit-text-fill-color:#6B7280 !important;
-    border:0 !important;
-    box-shadow:none !important;
-    opacity:1 !important;
-}}
-@media (max-width: 600px) {{
-    .itkf-logo {{width:58px; height:58px;}}
-    .itkf-logo:first-child {{width:72px; height:72px;}}
-    .itkf-logos-row {{gap:10px;}}
-    .itkf-event-title {{font-size:20px;}}
-    div[data-testid="stHorizontalBlock"] .stButton > button {{font-size:11px; padding:.35rem .2rem;}}
-}}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-
-def _logo_data_uri(path: Any) -> str | None:
+# ---------------- Secrets ----------------
+def secret(name, default=None):
     try:
-        if not path or not path.exists():
-            return None
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
-    except OSError:
+        return st.secrets[name]
+    except Exception:
+        return default
+
+GOOGLE_SHEET_API = secret("GOOGLE_SHEET_API", "")
+ADMIN_TOKEN = secret("ADMIN_TOKEN", "")
+ADMIN_PASSWORD = secret("ADMIN_PASSWORD", "")
+
+MAX_PASSPORT_MB = int(secret("MAX_PASSPORT_MB", 5))
+MAX_PASSPORT_BYTES = MAX_PASSPORT_MB * 1024 * 1024
+
+# ---------------- Branding ----------------
+# اللوجوهات بتتحط في مجلد assets/ جنب app.py بالظبط (نفس الأسماء دي):
+#   logo_main.png       -> لوجو الاتحاد (الأحمر/الأسود) - الأكبر
+#   logo_secondary.png  -> اللوجو التاني - الأصغر
+APP_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = APP_DIR / "assets"
+
+def find_asset(stem):
+    """Find logos in assets/ OR next to app.py, regardless of image extension/case."""
+    search_dirs = [ASSETS_DIR, APP_DIR]
+    for folder in search_dirs:
+        for ext in ("png", "jpg", "jpeg", "webp", "PNG", "JPG", "JPEG", "WEBP"):
+            candidate = folder / f"{stem}.{ext}"
+            if candidate.is_file():
+                return candidate
+    return None
+
+LOGO_MAIN_PATH = find_asset("logo_main")
+LOGO_SECONDARY_PATH = find_asset("logo_secondary")
+
+def _b64_of(path):
+    try:
+        if path and path.is_file():
+            return base64.b64encode(path.read_bytes()).decode("ascii")
+    except Exception:
+        pass
+    return None
+
+LOGO_MAIN_B64 = _b64_of(LOGO_MAIN_PATH)
+LOGO_SECONDARY_B64 = _b64_of(LOGO_SECONDARY_PATH)
+
+def _logo_data_uri(path):
+    if not path or not path.is_file():
         return None
+    mime = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp"
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+LOGO_MAIN_URI = _logo_data_uri(LOGO_MAIN_PATH)
+LOGO_SECONDARY_URI = _logo_data_uri(LOGO_SECONDARY_PATH)
+
+LOGO_URL = secret("LOGO_URL", "")  # احتياطي فقط لو ملفات الـ assets مش موجودة
+COMPANY_NAME = secret("COMPANY_NAME", "Egyptian Traditional Karate Federation")
+COMPANY_EMAIL = secret("COMPANY_EMAIL", "")
+CURRENCY = secret("CURRENCY", "EGP")
+CURRENCY_LABEL = "EGP" if CURRENCY == "EGP" else CURRENCY
+
+# =========================================================
+# EDITABLE PRICES
+# =========================================================
+# الأسعار افتراضيًا للroom/الnight الواحدة ما لم يُذكر غير ذلك.
+# القيمة None تعني أن السعر لسه معتمدش، فيبقى الحجز مقفول على الخيار ده.
+
+HOTEL_DATA = {
+    "Infantry House": {
+        "Single": 2700,
+        "Double": 2900,
+        "Triple": None,
+        "Quadruple": 4000,
+        "Meal Plan": "Breakfast",
+        "Lunch Supplement": 500,
+        "Dinner Supplement": 500,
+    },
+    "Engineering Authority House": {
+        "Single": 3000,
+        "Double": 3750,
+        "Triple": None,
+        "Quadruple": 6500,
+        "Meal Plan": "Breakfast",
+        "Lunch Supplement": 500,
+        "Dinner Supplement": 500,
+    },
+    "Air Defense House - Fifth Settlement": {
+        "Single": 4150,
+        "Double": 5120,
+        "Triple": 7800,
+        "Quadruple": 10400,
+        "Meal Plan": "-",
+        "Lunch Supplement": 0,
+        "Dinner Supplement": 0,
+    },
+    "Sonesta": {
+        "Single": 9000,
+        "Double": 10000,
+        "Triple": 12500,
+        "Quadruple": None,
+        "Meal Plan": "Breakfast + Dinner",
+        "Lunch Supplement": 1250,
+        "Dinner Supplement": 0,
+    },
+    "Baron Hotel": {
+        "Single": 6500,
+        "Double": 7000,
+        "Triple": 8100,
+        "Quadruple": None,
+        "Meal Plan": "Breakfast",
+        "Lunch Supplement": 800,
+        "Dinner Supplement": 800,
+    },
+    "Jewel Al Nasr": {
+        "Single": 2860,
+        "Double": 3900,
+        "Triple": 5200,
+        "Quadruple": 7250,
+        "Meal Plan": "Breakfast",
+        "Lunch Supplement": 0,
+        "Dinner Supplement": 0,
+    },
+    "Hilton": {
+        "Single": None,
+        "Double": None,
+        "Triple": None,
+        "Quadruple": None,
+        "Meal Plan": "Price to be confirmed",
+        "Lunch Supplement": 0,
+        "Dinner Supplement": 0,
+    },
+    "Air Defense House - Nozha": {
+        "Single": 3640,
+        "Double": 4160,
+        "Triple": None,
+        "Quadruple": 6760,
+        "Meal Plan": "Price to be confirmed",
+        "Lunch Supplement": 0,
+        "Dinner Supplement": 0,
+    },
+}
+
+# الأسعار None عمدًا لحد ما تعرفة Transportation النهائية توصل.
+TRANSPORT_DATA = {
+    "Limousine": 1000,
+    "Hiace Bus": 1000,
+    "Coaster Bus": 1000,
+    "33-Seat Bus": 1000,
+    "50-Seat Bus": 1000,
+}
 
 
-def render_header() -> None:
-    logos: list[str] = []
-    for key in ("logo1", "logo2", "logo3"):
-        uri = _logo_data_uri(LOGO_PATHS.get(key))
-        if uri:
-            logos.append(
-                f'<img class="itkf-logo" src="{uri}" alt="{html.escape(key)}">'
+ROOM_LABELS = {
+    "Single": "Single",
+    "Double": "Double",
+    "Triple": "Triple",
+    "Quadruple": "Quadruple",
+}
+
+ROOM_CAPACITY = {
+    "Single": 1,
+    "Double": 2,
+    "Triple": 3,
+    "Quadruple": 4,
+}
+
+# ---------------- Nationalities ----------------
+NATIONALITIES = [
+    "Afghanistan", "Albania", "Algeria", "Argentina", "Armenia",
+    "Australia", "Austria", "Azerbaijan", "Bahrain", "Bangladesh",
+    "Belarus", "Belgium", "Bosnia and Herzegovina", "Brazil", "Bulgaria",
+    "Cameroon", "Canada", "China", "Croatia", "Cyprus", "Czech Republic",
+    "Denmark", "Egypt", "Estonia", "Ethiopia", "Finland", "France",
+    "Georgia", "Germany", "Ghana", "Greece", "Hungary", "India",
+    "Indonesia", "Iran", "Iraq", "Ireland", "Italy", "Japan", "Jordan",
+    "Kazakhstan", "Kenya", "Kuwait", "Kyrgyzstan", "Lebanon", "Libya",
+    "Lithuania", "Luxembourg", "Malaysia", "Malta", "Mauritius",
+    "Mexico", "Morocco", "Netherlands", "New Zealand", "Nigeria",
+    "Norway", "Oman", "Pakistan", "Palestine", "Philippines", "Poland",
+    "Portugal", "Qatar", "Romania", "Russia", "Saudi Arabia", "Serbia",
+    "Singapore", "Slovakia", "Slovenia", "South Africa", "South Korea",
+    "Spain", "Sudan", "Sweden", "Switzerland", "Syria", "Tanzania",
+    "Thailand", "Tunisia", "Turkey", "Uganda", "Ukraine",
+    "United Arab Emirates", "United Kingdom", "United States",
+    "Uzbekistan", "Vietnam", "Yemen", "Zambia", "Zimbabwe", "Other",
+]
+
+# ---------------- CSS (RTL + professional look) ----------------
+st.markdown("""
+<style>
+html, body, [class*="css"]  { direction: ltr; }
+.block-container {max-width: 880px; padding-top: 1.2rem; direction: ltr;}
+* { text-align: left; }
+.stButton, .stDownloadButton { direction: ltr; }
+
+/* Top brand bar */
+.brand-bar{
+    display:flex; align-items:center; justify-content:space-between;
+    gap:14px; padding:14px 20px; margin-bottom:18px;
+    background:linear-gradient(135deg,#0f172a,#1e293b);
+    border-radius:16px; color:#fff;
+}
+.brand-bar h1{ font-size:1.15rem; margin:0; color:#fff; }
+.brand-bar span{ font-size:0.8rem; color:#cbd5e1; }
+.logo-wrap{ display:flex; align-items:center; gap:10px; }
+.logo-wrap img{ display:block; border-radius:8px; background:#fff; }
+.logo-wrap img.logo-main{ height:54px; padding:4px; }
+.logo-wrap img.logo-sub{ height:38px; padding:4px; }
+
+/* Free page navigation */
+.nav-caption { color:#6b7280; font-size:.82rem; margin:2px 0 8px; }
+
+.booking-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    padding: 20px;
+    margin: 12px 0;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.section-title{ font-weight:700; font-size:1.05rem; margin-bottom:6px; }
+.small-muted {color:#6b7280;font-size:0.88rem;}
+.total-box {
+    border: 2px solid #111827;
+    border-radius: 14px;
+    padding: 16px 20px;
+    font-size: 1.2rem;
+    font-weight: 800;
+    background:#f8fafc;
+    margin-top:10px;
+}
+.price-pill{
+    display:inline-block; padding:4px 12px; border-radius:999px;
+    background:#eef2ff; color:#3730a3; font-size:0.85rem; font-weight:600;
+}
+.warn-pill{
+    display:inline-block; padding:4px 12px; border-radius:999px;
+    background:#fef3c7; color:#92400e; font-size:0.85rem; font-weight:600;
+}
+.footer-note{ text-align:center; color:#94a3b8; font-size:0.78rem; margin-top:28px; }
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- Session ----------------
+if "page" not in st.session_state:
+    st.session_state.page = "personal"
+if "booking_id" not in st.session_state:
+    st.session_state.booking_id = None
+if "invoice_pdf" not in st.session_state:
+    st.session_state.invoice_pdf = None
+if "last_backend_error" not in st.session_state:
+    st.session_state.last_backend_error = None
+
+PAGE_ORDER = ["personal", "hotel", "transport", "review", "success"]
+STEP_LABELS = ["Personal Details", "Hotel", "Transportation", "Review", "Complete"]
+
+# =========================================================
+# HELPERS
+# =========================================================
+def valid_email(email):
+    return bool(re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", email.strip()))
+
+def clean_text(value, max_len=200):
+    value = str(value or "").strip()
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", value)
+    return value[:max_len]
+
+def clean_passport(value):
+    # منع فروق التنسيق (مسافات / حروف صغيرة وكبيرة) اللي ممكن تخلي نفس
+    # الجواز يتسجل مرتين وهو ظاهريًا "مختلف".
+    value = clean_text(value, 30)
+    return re.sub(r"\s+", "", value).upper()
+
+def money(value):
+    return f"{value:,.2f} {CURRENCY_LABEL}"
+
+def generate_ids():
+    token = uuid.uuid4().hex[:10].upper()
+    return f"BK-{token}", f"INV-{token}"
+
+def hotel_price(hotel, room_type):
+    return HOTEL_DATA.get(hotel, {}).get(room_type)
+
+def meal_supplement(hotel, meal_name):
+    return float(HOTEL_DATA.get(hotel, {}).get(meal_name, 0) or 0)
+
+def image_to_bytes(uploaded_file):
+    if uploaded_file is None:
+        return None, None
+    raw = uploaded_file.getvalue()
+    if len(raw) > MAX_PASSPORT_BYTES:
+        raise ValueError(f"Passport image must be smaller than {MAX_PASSPORT_MB} MB.")
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.verify()
+        img = Image.open(io.BytesIO(raw))
+        if img.width > 5000 or img.height > 5000:
+            raise ValueError("Passport image dimensions are too large.")
+        img = img.convert("RGB")
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=90, optimize=True)
+        return out.getvalue(), "passport.jpg"
+    except Exception as exc:
+        raise ValueError("The passport file is not a valid image.") from exc
+
+def render_brand_bar():
+    """Render logos with st.image instead of HTML data-URI images.
+    This is more reliable on Streamlit Cloud/mobile browsers.
+    """
+    safe_company = html.escape(str(COMPANY_NAME))
+    st.markdown(
+        f"<div class='brand-bar'><div><h1>{safe_company}</h1>"
+        "<span>Online Booking & Registration System</span></div></div>",
+        unsafe_allow_html=True,
+    )
+
+    logo_paths = [x for x in (LOGO_MAIN_PATH, LOGO_SECONDARY_PATH) if x and x.is_file()]
+    if logo_paths:
+        cols = st.columns(len(logo_paths))
+        for col, path in zip(cols, logo_paths):
+            with col:
+                st.image(str(path), use_container_width=True)
+    elif LOGO_URL:
+        st.image(LOGO_URL, use_container_width=True)
+
+def navigate_to(page):
+    st.session_state.page = page
+    st.rerun()
+
+def render_navigation():
+    labels = {
+        "personal": "Personal",
+        "hotel": "Hotel",
+        "transport": "Transportation",
+        "review": "Review",
+        "success": "Complete",
+    }
+    st.markdown("<div class='nav-caption'>You can move between pages freely to preview the app.</div>", unsafe_allow_html=True)
+    cols = st.columns(len(PAGE_ORDER))
+    for col, page in zip(cols, PAGE_ORDER):
+        with col:
+            if st.button(labels[page], key=f"nav_{page}", use_container_width=True, type="primary" if st.session_state.page == page else "secondary"):
+                navigate_to(page)
+
+
+def _pdf_logo_flowable():
+    cells = []
+    for path, width in ((LOGO_MAIN_PATH, 28 * mm), (LOGO_SECONDARY_PATH, 20 * mm)):
+        if path and path.is_file():
+            try:
+                cells.append(RLImage(str(path), width=width, height=width))
+            except Exception:
+                pass
+
+    if cells:
+        col_widths = [img.drawWidth + 6 * mm for img in cells]
+        table = Table([cells], colWidths=col_widths)
+        table.hAlign = "CENTER"
+        table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return table
+
+    if LOGO_URL:
+        try:
+            resp = requests.get(LOGO_URL, timeout=8)
+            resp.raise_for_status()
+            img = RLImage(io.BytesIO(resp.content), width=32 * mm, height=32 * mm)
+            img.hAlign = "CENTER"
+            return img
+        except Exception:
+            pass
+
+    return None
+
+def create_invoice_pdf(data):
+    out = io.BytesIO()
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="InvoiceTitle",
+        parent=styles["Title"],
+        alignment=TA_CENTER,
+        fontSize=18,
+        leading=22,
+        spaceAfter=6,
+    ))
+    styles.add(ParagraphStyle(
+        name="Small",
+        parent=styles["Normal"],
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#6b7280"),
+    ))
+
+    doc = SimpleDocTemplate(
+        out,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+    )
+
+    story = []
+
+    logo_flow = _pdf_logo_flowable()
+    if logo_flow is not None:
+        story.append(logo_flow)
+        story.append(Spacer(1, 8))
+
+    story += [
+        Paragraph(COMPANY_NAME, styles["InvoiceTitle"]),
+        Paragraph("Booking Invoice", styles["Heading2"]),
+        Spacer(1, 5),
+        Paragraph(f"<b>Booking ID:</b> {data['booking_id']}", styles["Normal"]),
+        Paragraph(f"<b>Invoice No:</b> {data['invoice_no']}", styles["Normal"]),
+        Paragraph(f"<b>Customer:</b> {data['full_name']}", styles["Normal"]),
+        Paragraph(f"<b>Email:</b> {data['email']}", styles["Normal"]),
+        Paragraph(f"<b>Nationality:</b> {data['nationality']}", styles["Normal"]),
+        Spacer(1, 10),
+    ]
+
+    rows = [["Item", "Details", "Qty", "Unit Price", "Total"]]
+    for item in data["items"]:
+        rows.append([
+            item["item"],
+            item["details"],
+            str(item["qty"]),
+            money(item["unit_price"]),
+            money(item["total"]),
+        ])
+
+    table = Table(rows, colWidths=[34 * mm, 66 * mm, 15 * mm, 30 * mm, 30 * mm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (2, 1), (-1, -1), "RIGHT"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"<b>Grand Total: {money(data['total'])}</b>", styles["Heading2"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        "This invoice is generated electronically. Prices are based on the booking "
+        "options selected by the customer.",
+        styles["Small"],
+    ))
+    if COMPANY_EMAIL:
+        story.append(Paragraph(f"Contact: {COMPANY_EMAIL}", styles["Small"]))
+    doc.build(story)
+    return out.getvalue()
+
+def backend_post(payload, timeout=30, retries=2):
+    if not GOOGLE_SHEET_API:
+        raise RuntimeError("GOOGLE_SHEET_API is not configured in Streamlit secrets.")
+
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            response = requests.post(
+                GOOGLE_SHEET_API,
+                json=payload,
+                timeout=timeout,
+                headers={"Content-Type": "application/json"},
             )
-    st.markdown(
-        f"""
-        <div class="itkf-header">
-          <div class="itkf-logos-row">{''.join(logos)}</div>
-          <div class="itkf-event-title">{html.escape(EVENT_TITLE)}</div>
-          <div class="itkf-system-title">{html.escape(SYSTEM_TITLE)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            response.raise_for_status()
+            try:
+                result = response.json()
+            except Exception:
+                result = {"ok": response.text.strip().lower() == "ok", "raw": response.text}
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise RuntimeError(
+                    result.get("message") or result.get("error", "Backend rejected the request.")
+                )
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))  # backoff قبل إعادة المحاولة
+                continue
+    raise last_exc
 
+def check_duplicate(passport_no):
+    """
+    يتحقق مع الباك إند إن كان رقم الجواز ده مسجل قبل كده.
+    ملحوظة تكامل: الـ Google Apps Script المرفوع لازم يفهم
+    action = "check_duplicate" ويرجّع {"ok": true, "exists": true/false}
+    بعد ما تبعتيلي كود السيرفر هظبط الشكل بالظبط لو مختلف.
+    """
+    try:
+        result = backend_post({
+            "action": "check_duplicate",
+            "api_token": secret("BOOKING_API_TOKEN", ""),
+            "passport_no": passport_no,
+        }, timeout=15, retries=1)
+        return bool(result.get("exists", False)), None
+    except Exception as exc:
+        # ما بنمنعش المستخدم من الاستمرار لو خدمة الفحص نفسها وقعت،
+        # لكن بنوضح إن الفحص ما تمش عشان تتابعي الموضوع من لوحة الأدمن.
+        return False, str(exc)
 
-def section_title(icon: str, title: str, help_text: str = "") -> None:
-    st.markdown(
-        f'<div class="itkf-section-title">{icon} {html.escape(title)}</div>',
-        unsafe_allow_html=True,
+# =========================================================
+# PREVIEW DATA
+# =========================================================
+def get_preview_personal():
+    return {
+        "full_name": "Preview Guest",
+        "passport_no": "PREVIEW123",
+        "nationality": "Egypt",
+        "dob": "1990-01-01",
+        "email": "preview@example.com",
+        "phone": "+20 100 000 0000",
+        "passport_bytes": b"",
+        "passport_name": "preview.jpg",
+    }
+
+def get_preview_hotel():
+    hotel = "Infantry House"
+    room = "Double"
+    guests = 2
+    nights = 2
+    lunch_rate = meal_supplement(hotel, "Lunch Supplement")
+    dinner_rate = meal_supplement(hotel, "Dinner Supplement")
+    return {
+        "hotel": hotel, "room_type": room, "guests": guests,
+        "check_in": date.today().isoformat(),
+        "check_out": (date.today() + timedelta(days=nights)).isoformat(),
+        "nights": nights, "unit_price": hotel_price(hotel, room),
+        "room_total": hotel_price(hotel, room) * nights,
+        "lunch_selected": True, "lunch_unit_price": lunch_rate,
+        "lunch_total": lunch_rate * guests * nights,
+        "dinner_selected": True, "dinner_unit_price": dinner_rate,
+        "dinner_total": dinner_rate * guests * nights,
+        "meal_total": (lunch_rate + dinner_rate) * guests * nights,
+        "total": (hotel_price(hotel, room) + (lunch_rate + dinner_rate) * guests) * nights,
+        "meal_plan": HOTEL_DATA[hotel]["Meal Plan"],
+    }
+
+def get_preview_transport():
+    transport = "Limousine"
+    qty = 1
+    unit = TRANSPORT_DATA[transport]
+    return {"transport": transport, "qty": qty, "unit_price": unit, "total": unit * qty}
+
+# =========================================================
+# HEADER (shown on every page)
+# =========================================================
+render_brand_bar()
+render_navigation()
+
+# =========================================================
+# PAGE 1 — PERSONAL DATA
+# =========================================================
+if st.session_state.page == "personal":
+    st.markdown('<div class="booking-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">📝 Personal Details</div>', unsafe_allow_html=True)
+    st.caption("Please enter the information exactly as it appears on your passport.")
+
+    full_name = st.text_input("Full Name *")
+    passport_no = st.text_input("Passport Number *", max_chars=30)
+    nationality = st.selectbox("Nationality *", NATIONALITIES, index=None, placeholder="Select nationality")
+    dob = st.date_input(
+        "Date of Birth *",
+        min_value=date(1900, 1, 1),
+        max_value=date.today(),
+        value=None,
     )
-    if help_text:
+    email = st.text_input("Email Address *", help="Your booking invoice will be sent to this email.")
+    phone = st.text_input("Phone Number", max_chars=30)
+    passport_file = st.file_uploader(
+        f"Passport Image * (JPG/PNG, maximum {MAX_PASSPORT_MB} MB)",
+        type=["jpg", "jpeg", "png"],
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.button("Next →", use_container_width=True, type="primary"):
+        errors = []
+        if not clean_text(full_name):
+            errors.append("Full name is required.")
+        if not clean_text(passport_no):
+            errors.append("Passport number is required.")
+        if nationality is None:
+            errors.append("Nationality is required.")
+        if dob is None:
+            errors.append("Date of birth is required.")
+        if not valid_email(email):
+            errors.append("Please enter a valid email address.")
+        if passport_file is None:
+            errors.append("Passport image is required.")
+
+        if errors:
+            for err in errors:
+                st.error(err)
+        else:
+            try:
+                passport_bytes, passport_name = image_to_bytes(passport_file)
+                st.session_state.personal = {
+                    "full_name": clean_text(full_name),
+                    "passport_no": clean_passport(passport_no),
+                    "nationality": nationality,
+                    "dob": dob.isoformat(),
+                    "email": clean_text(email, 254),
+                    "phone": clean_text(phone, 30),
+                    "passport_bytes": passport_bytes,
+                    "passport_name": passport_name,
+                }
+                st.session_state.page = "hotel"
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+# =========================================================
+# PAGE 2 — HOTEL
+# =========================================================
+elif st.session_state.page == "hotel":
+    st.markdown('<div class="booking-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🏨 Hotel Selection</div>', unsafe_allow_html=True)
+
+    hotel_names = list(HOTEL_DATA.keys())
+    hotel = st.selectbox("Select hotel", hotel_names)
+
+    available_rooms = [
+        room for room in ["Single", "Double", "Triple", "Quadruple"]
+        if hotel_price(hotel, room) is not None
+    ]
+
+    if not available_rooms:
         st.markdown(
-            f'<div class="itkf-section-help">{html.escape(help_text)}</div>',
+            '<span class="warn-pill">⏳ The price for this hotel has not been confirmed yet.</span>',
+            unsafe_allow_html=True,
+        )
+        room_type = None
+        guests = 1
+    else:
+        room_type = st.selectbox(
+            "Room type",
+            available_rooms,
+            format_func=lambda r: ROOM_LABELS.get(r, r),
+        )
+
+        max_guests = ROOM_CAPACITY[room_type]
+        guests = st.number_input(
+            "Number of guests",
+            min_value=1,
+            max_value=max_guests,
+            value=max_guests,
+            step=1,
+            help="Meal supplements are calculated per guest per night.",
+        )
+
+        st.markdown(
+            f'<span class="price-pill">💰 {money(hotel_price(hotel, room_type))} / room / night</span> '
+            f'&nbsp; <span class="small-muted">🍽️ {HOTEL_DATA[hotel]["Meal Plan"]}</span>',
             unsafe_allow_html=True,
         )
 
+        lunch_rate = meal_supplement(hotel, "Lunch Supplement")
+        dinner_rate = meal_supplement(hotel, "Dinner Supplement")
 
-def _first_hotel_defaults() -> tuple[str, str, str]:
-    hotel = next(iter(HOTELS))
-    meal = next(iter(HOTELS[hotel]["rates"]))
-    room = next(iter(HOTELS[hotel]["rates"][meal]))
-    return hotel, meal, room
-
-
-DEFAULT_HOTEL, DEFAULT_MEAL, DEFAULT_ROOM = _first_hotel_defaults()
-DEFAULT_COUNTRY = country_for_code(DEFAULT_COUNTRY_CODE)
-DEFAULT_VEHICLE = next(iter(TRANSPORTATION)) if TRANSPORTATION else None
-DEFAULT_TRANSPORT_SERVICE = next(iter(TRANSPORT_SERVICES)) if TRANSPORT_SERVICES else None
-DEFAULT_TRANSPORT_MODE = (
-    TRANSPORTATION[DEFAULT_VEHICLE]["pricing_modes"][0] if DEFAULT_VEHICLE else None
-)
-DEFAULTS = {
-    "current_page": "Personal",
-    "guest_name": "",
-    "nationality": DEFAULT_COUNTRY.name,
-    "nationality_code": DEFAULT_COUNTRY.iso2,
-    "phone_country_code": DEFAULT_COUNTRY.calling_code,
-    "phone_national": "",
-    "phone": "",
-    "phone_valid": False,
-    "email": "",
-    "personal_photo": None,
-    "passport_photo": None,
-    "hotel": DEFAULT_HOTEL,
-    "_hotel_context": DEFAULT_HOTEL,
-    "meal_plan": DEFAULT_MEAL,
-    "room_type": DEFAULT_ROOM,
-    "guests": 1,
-    "check_in": date.today(),
-    "check_out": date.today() + timedelta(days=1),
-    "wants_transportation": False,
-    "vehicle_type": DEFAULT_VEHICLE,
-    "transport_service": DEFAULT_TRANSPORT_SERVICE,
-    "transport_pricing_mode": DEFAULT_TRANSPORT_MODE,
-    "transport_persons": 1,
-    "transport_vehicle_count": 1,
-    "booking_submitted": False,
-    "last_booking": None,
-    "pending_submission": None,
-    "pending_error": "",
-}
-
-for state_key, default_value in DEFAULTS.items():
-    if state_key not in st.session_state:
-        st.session_state[state_key] = default_value
-
-
-PAGES = ["Personal", "Hotel", "Transportation", "Review", "Complete"]
-PAGE_LABELS = {
-    "Personal": "Personal",
-    "Hotel": "Hotel",
-    "Transportation": "Transport",
-    "Review": "Review",
-    "Complete": "Complete",
-}
-
-
-def go_to(page: str) -> None:
-    st.session_state.current_page = page
-
-
-def render_navigation() -> None:
-    columns = st.columns(len(PAGES))
-    for column, page_name in zip(columns, PAGES):
-        with column:
-            st.button(
-                PAGE_LABELS[page_name],
-                key=f"nav_{page_name}",
-                use_container_width=True,
-                type="primary" if st.session_state.current_page == page_name else "secondary",
-                on_click=go_to,
-                args=(page_name,),
-            )
-
-
-def _normalize_hotel_state() -> None:
-    hotel = st.session_state.get("hotel")
-    if hotel not in HOTELS:
-        st.session_state.hotel = DEFAULT_HOTEL
-        hotel = DEFAULT_HOTEL
-
-    if st.session_state.get("_hotel_context") != hotel:
-        meal = next(iter(HOTELS[hotel]["rates"]))
-        room = next(iter(HOTELS[hotel]["rates"][meal]))
-        st.session_state.meal_plan = meal
-        st.session_state.room_type = room
-        st.session_state.guests = 1
-        st.session_state._hotel_context = hotel
-
-    plans = HOTELS[hotel]["rates"]
-    if st.session_state.get("meal_plan") not in plans:
-        st.session_state.meal_plan = next(iter(plans))
-    rooms = plans[st.session_state.meal_plan]
-    if st.session_state.get("room_type") not in rooms:
-        st.session_state.room_type = next(iter(rooms))
-    expected_guests = ROOM_OCCUPANCY.get(st.session_state.room_type, 1)
-    if int(st.session_state.get("guests", 0)) != expected_guests:
-        st.session_state.guests = expected_guests
-
-
-def _sync_guests_to_room() -> None:
-    """Set the exact guest count represented by the selected room type."""
-
-    st.session_state.guests = ROOM_OCCUPANCY.get(
-        st.session_state.get("room_type", DEFAULT_ROOM), 1
-    )
-
-
-def _normalize_transport_state() -> None:
-    vehicle = st.session_state.get("vehicle_type")
-    if vehicle not in TRANSPORTATION:
-        st.session_state.vehicle_type = DEFAULT_VEHICLE
-        vehicle = DEFAULT_VEHICLE
-    if st.session_state.get("transport_service") not in TRANSPORT_SERVICES:
-        st.session_state.transport_service = DEFAULT_TRANSPORT_SERVICE
-    modes = TRANSPORTATION.get(vehicle, {}).get("pricing_modes", ())
-    if st.session_state.get("transport_pricing_mode") not in modes:
-        st.session_state.transport_pricing_mode = modes[0] if modes else None
-    try:
-        if int(st.session_state.get("transport_persons", 0)) < 1:
-            st.session_state.transport_persons = 1
-    except (TypeError, ValueError):
-        st.session_state.transport_persons = 1
-    try:
-        if int(st.session_state.get("transport_vehicle_count", 0)) < 1:
-            st.session_state.transport_vehicle_count = 1
-    except (TypeError, ValueError):
-        st.session_state.transport_vehicle_count = 1
-
-
-def _ensure_checkout() -> None:
-    if st.session_state.check_out <= st.session_state.check_in:
-        st.session_state.check_out = st.session_state.check_in + timedelta(days=1)
-
-
-def _sync_country() -> None:
-    country = countries_by_name().get(st.session_state.get("nationality"))
-    if country is None:
-        country = DEFAULT_COUNTRY
-        st.session_state.nationality = country.name
-    st.session_state.nationality_code = country.iso2
-    st.session_state.phone_country_code = country.calling_code
-
-
-def current_nights() -> int:
-    try:
-        return calculate_nights(st.session_state.check_in, st.session_state.check_out)
-    except (AttributeError, TypeError):
-        return 0
-
-
-def current_totals() -> dict[str, float | int | str | bool | None]:
-    _normalize_hotel_state()
-    _normalize_transport_state()
-    return calculate_booking_totals(
-        st.session_state.hotel,
-        st.session_state.meal_plan,
-        st.session_state.room_type,
-        current_nights(),
-        bool(st.session_state.wants_transportation),
-        st.session_state.vehicle_type,
-        int(st.session_state.transport_persons),
-        st.session_state.transport_service,
-        st.session_state.transport_pricing_mode,
-        int(st.session_state.transport_vehicle_count),
-    )
-
-
-def render_price_box(totals: dict[str, float | int | str | bool | None]) -> None:
-    if totals.get("transport_price_pending"):
-        transport_line = "<b>Transportation:</b> Price pending"
-    elif totals.get("transport_pricing_label") == "Not requested":
-        transport_line = "<b>Transportation:</b> Not requested"
-    else:
-        unit_price_eur = totals.get("transport_unit_price_eur") or 0.0
-        unit_price_egp = totals.get("transport_unit_price_egp") or 0.0
-        pricing_label = html.escape(str(totals.get("transport_pricing_label") or ""))
-        billed_units = int(totals.get("transport_billed_units") or 0)
-        transport_line = (
-            f"<b>Transportation:</b> {format_currency(float(totals['transport_total_eur']), 'EUR')} "
-            f"/ {format_currency(float(totals['transport_total_egp']), 'EGP')}<br>"
-            f"<small>{pricing_label}: {format_currency(float(unit_price_eur), 'EUR')} "
-            f"/ {format_currency(float(unit_price_egp), 'EGP')} × {billed_units}</small>"
+        st.markdown("**Optional meal supplements**")
+        lunch_selected = st.checkbox(
+            f"Add Lunch (+{money(lunch_rate)} per guest / night)",
+            value=False,
+            disabled=lunch_rate <= 0,
         )
-    st.markdown(
-        f"""
-        <div class="itkf-price-box">
-          <b>Room total:</b> {format_currency(float(totals['room_total_eur']), 'EUR')}<br>
-          {transport_line}
-          <hr style="margin:8px 0;">
-          <b>Grand total - EUR:</b> {format_currency(float(totals['grand_total_eur']), 'EUR')}<br>
-          <b>USD:</b> {format_currency(float(totals['grand_total_usd']), 'USD')}
-          &nbsp; | &nbsp;
-          <b>EGP:</b> {format_currency(float(totals['grand_total_egp']), 'EGP')}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        dinner_selected = st.checkbox(
+            f"Add Dinner (+{money(dinner_rate)} per guest / night)",
+            value=False,
+            disabled=dinner_rate <= 0,
+        )
 
+        if lunch_rate <= 0:
+            st.caption("Lunch supplement is not currently configured for this hotel.")
+        if dinner_rate <= 0:
+            st.caption("Dinner supplement is not currently configured for this hotel.")
 
-def _process_upload(uploaded: Any, state_key: str) -> None:
-    if uploaded is None:
-        return
-    token_key = f"_{state_key}_token"
-    token = (getattr(uploaded, "name", ""), getattr(uploaded, "size", None))
-    if st.session_state.get(token_key) == token and st.session_state.get(state_key):
-        return
-    try:
-        st.session_state[state_key] = validate_uploaded_image(uploaded)
-        st.session_state[token_key] = token
-    except ValueError as exc:
-        st.session_state[state_key] = None
-        st.session_state.pop(token_key, None)
-        st.error(str(exc))
+    st.write("")
+    col1, col2 = st.columns(2)
+    with col1:
+        check_in = st.date_input("Check-in date", value=date.today())
+    with col2:
+        check_out = st.date_input("Check-out date", value=date.today())
 
+    nights = (check_out - check_in).days
 
-def _remove_upload(state_key: str, widget_key: str) -> None:
-    st.session_state[state_key] = None
-    st.session_state.pop(f"_{state_key}_token", None)
-    st.session_state.pop(widget_key, None)
+    if nights <= 0:
+        st.warning("Check-out date must be after check-in date.")
+    elif room_type:
+        room_total = hotel_price(hotel, room_type) * nights
+        lunch_total = (
+            lunch_rate * int(guests) * nights
+            if lunch_selected else 0
+        )
+        dinner_total = (
+            dinner_rate * int(guests) * nights
+            if dinner_selected else 0
+        )
+        meal_total = lunch_total + dinner_total
+        total_hotel = room_total + meal_total
 
+        st.markdown(
+            f'<div class="total-box">Room: {money(room_total)}<br>'
+            f'Lunch: {money(lunch_total)}<br>'
+            f'Dinner: {money(dinner_total)}<br>'
+            f'<b>Hotel total: {money(total_hotel)}</b></div>',
+            unsafe_allow_html=True,
+        )
 
-def booking_from_state() -> dict[str, Any]:
-    nights = current_nights()
-    totals = current_totals()
-    return {
-        "guest_name": str(st.session_state.get("guest_name", "")).strip(),
-        "nationality": str(st.session_state.get("nationality", "")).strip(),
-        "nationality_code": str(st.session_state.get("nationality_code", "")).strip(),
-        "phone_country_code": str(st.session_state.get("phone_country_code", "")).strip(),
-        "phone": str(st.session_state.get("phone", "")).strip(),
-        "phone_valid": bool(st.session_state.get("phone_valid", False)),
-        "email": str(st.session_state.get("email", "")).strip(),
-        "personal_photo": st.session_state.get("personal_photo"),
-        "passport_photo": st.session_state.get("passport_photo"),
-        "hotel": st.session_state.hotel,
-        "meal_plan": st.session_state.meal_plan,
-        "room_type": st.session_state.room_type,
-        "guests": int(st.session_state.guests),
-        "check_in": st.session_state.check_in,
-        "check_out": st.session_state.check_out,
-        "nights": nights,
-        "wants_transportation": bool(st.session_state.wants_transportation),
-        "vehicle_type": st.session_state.vehicle_type if st.session_state.wants_transportation else None,
-        "transport_service": (
-            st.session_state.transport_service if st.session_state.wants_transportation else None
-        ),
-        "transport_pricing_mode": (
-            st.session_state.transport_pricing_mode if st.session_state.wants_transportation else None
-        ),
-        "transport_persons": int(st.session_state.transport_persons) if st.session_state.wants_transportation else 0,
-        "transport_vehicle_count": (
-            int(st.session_state.transport_vehicle_count)
-            if st.session_state.wants_transportation
-            and st.session_state.transport_pricing_mode == "per_vehicle"
-            else 0
-        ),
-        **totals,
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    col_back, col_next = st.columns(2)
+    with col_back:
+        if st.button("← Back", use_container_width=True):
+            st.session_state.page = "personal"
+            st.rerun()
+    with col_next:
+        if st.button("Next →", use_container_width=True, type="primary"):
+            if room_type is None:
+                st.error("Please select a hotel with an approved price.")
+            elif nights <= 0:
+                st.error("Check-out date must be after check-in date.")
+            else:
+                st.session_state.hotel = {
+                    "hotel": hotel,
+                    "room_type": room_type,
+                    "guests": int(guests),
+                    "check_in": check_in.isoformat(),
+                    "check_out": check_out.isoformat(),
+                    "nights": nights,
+                    "unit_price": hotel_price(hotel, room_type),
+                    "room_total": room_total,
+                    "lunch_selected": bool(lunch_selected),
+                    "lunch_unit_price": lunch_rate,
+                    "lunch_total": lunch_total,
+                    "dinner_selected": bool(dinner_selected),
+                    "dinner_unit_price": dinner_rate,
+                    "dinner_total": dinner_total,
+                    "meal_total": meal_total,
+                    "total": total_hotel,
+                    "meal_plan": HOTEL_DATA[hotel]["Meal Plan"],
+                }
+                st.session_state.page = "transport"
+                st.rerun()
+
+# PAGE 3 — TRANSPORT
+# =========================================================
+elif st.session_state.page == "transport":
+    st.markdown('<div class="booking-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🚌 Transportation</div>', unsafe_allow_html=True)
+
+    transport = st.selectbox("Transportation Method", list(TRANSPORT_DATA.keys()))
+
+    if TRANSPORT_DATA[transport] is None:
+        st.markdown('<span class="warn-pill">⏳ The price for this transportation option has not been confirmed yet</span>', unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f'<span class="price-pill">💰 {money(TRANSPORT_DATA[transport])}</span>',
+            unsafe_allow_html=True,
+        )
+
+    qty = st.number_input("Quantity", min_value=1, max_value=100, value=1, step=1)
+
+    if TRANSPORT_DATA[transport] is not None:
+        st.markdown(
+            f'<div class="total-box">Transportation Total: {money(TRANSPORT_DATA[transport] * int(qty))}</div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    col_back, col_next = st.columns(2)
+    with col_back:
+        if st.button("← Back", use_container_width=True):
+            st.session_state.page = "hotel"
+            st.rerun()
+    with col_next:
+        if st.button("Next →", use_container_width=True, type="primary"):
+            if TRANSPORT_DATA[transport] is None:
+                st.error("The price for this transportation option has not been confirmed yet.")
+            else:
+                unit = TRANSPORT_DATA[transport]
+                st.session_state.transport = {
+                    "transport": transport,
+                    "qty": int(qty),
+                    "unit_price": unit,
+                    "total": unit * int(qty),
+                }
+                st.session_state.page = "review"
+                st.rerun()
+
+# =========================================================
+# PAGE 4 — REVIEW
+# =========================================================
+elif st.session_state.page == "review":
+    st.markdown('<div class="section-title">✅ Review & Confirmation</div>', unsafe_allow_html=True)
+
+    preview_mode = not (st.session_state.get("personal") and st.session_state.get("hotel") and st.session_state.get("transport"))
+    p = st.session_state.personal or get_preview_personal()
+    h = st.session_state.hotel or get_preview_hotel()
+    t = st.session_state.transport or get_preview_transport()
+
+    if preview_mode:
+        st.info("Preview mode: this page is only showing the design. Enter the Personal Details and move through the booking normally before submitting a real booking.")
+
+    hotel_item = {
+        "item": "Accommodation",
+        "details": f"{h['hotel']} — {ROOM_LABELS.get(h['room_type'], h['room_type'])} — {h['nights']} night",
+        "qty": h["nights"],
+        "unit_price": h["unit_price"],
+        "total": h["total"],
+    }
+    transport_item = {
+        "item": "Transportation",
+        "details": t["transport"],
+        "qty": t["qty"],
+        "unit_price": t["unit_price"],
+        "total": t["total"],
     }
 
+    meal_items = []
+    if h.get("lunch_selected") and h.get("lunch_total", 0) > 0:
+        meal_items.append({
+            "item": "Lunch",
+            "details": f"{h['hotel']} — {h['guests']} guest(s) — {h['nights']} night(s)",
+            "qty": h["guests"] * h["nights"],
+            "unit_price": h["lunch_unit_price"],
+            "total": h["lunch_total"],
+        })
+    if h.get("dinner_selected") and h.get("dinner_total", 0) > 0:
+        meal_items.append({
+            "item": "Dinner",
+            "details": f"{h['hotel']} — {h['guests']} guest(s) — {h['nights']} night(s)",
+            "qty": h["guests"] * h["nights"],
+            "unit_price": h["dinner_unit_price"],
+            "total": h["dinner_total"],
+        })
 
-def submission_record(raw: dict[str, Any]) -> dict[str, Any]:
-    excluded = {"personal_photo", "passport_photo"}
-    record = {key: value for key, value in raw.items() if key not in excluded}
-    record["check_in"] = raw["check_in"].isoformat()
-    record["check_out"] = raw["check_out"].isoformat()
-    record["booking_id"] = generate_booking_id()
-    record["booking_date"] = current_timestamp()
-    record["status"] = "Pending"
-    return record
+    items = [hotel_item] + meal_items + [transport_item]
+    total = sum(x["total"] for x in items)
 
+    st.markdown('<div class="booking-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">👤 Personal Details</div>', unsafe_allow_html=True)
+    st.write(f"**Name:** {p['full_name']}")
+    st.write(f"**Passport Number:** {p['passport_no']}")
+    st.write(f"**Nationality:** {p['nationality']}")
+    st.write(f"**Date of Birth:** {p['dob']}")
+    st.write(f"**Email:** {p['email']}")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-def attempt_pending_save() -> None:
-    pending = st.session_state.get("pending_submission")
-    if not pending:
-        return
-    with st.spinner("Saving the booking securely..."):
-        result = save_to_google_sheets(
-            pending["record"], pending.get("personal_photo"), pending.get("passport_photo")
-        )
-
-    if not result.saved:
-        st.session_state.pending_error = result.message
-        return
-
-    record = dict(pending["record"])
-    record.update(
-        {
-            "personal_photo_url": result.data.get("personal_photo_url", ""),
-            "passport_photo_url": result.data.get("passport_photo_url", ""),
-            "invoice_no": result.data.get("invoice_no", ""),
-            "invoice_url": result.data.get("invoice_url", ""),
-            "invoice_verification_code": result.data.get("invoice_verification_code", ""),
-            "invoice_sha256": result.data.get("invoice_sha256", ""),
-            "invoice_pdf_bytes": result.data.get("_invoice_pdf_bytes"),
-            "invoice_created": bool(result.data.get("invoice_created")),
-            "customer_email_sent": bool(result.data.get("customer_email_sent")),
-            "email_error": result.data.get("email_error", ""),
-            "status": result.data.get("status", "Saved"),
-            "files_ok": result.files_ok,
-        }
+    st.markdown('<div class="booking-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🧾 Booking Details</div>', unsafe_allow_html=True)
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "Item": x["item"],
+                "Details": x["details"],
+                "Qty": x["qty"],
+                "Unit Price": money(x["unit_price"]),
+                "Total": money(x["total"]),
+            }
+            for x in items
+        ]),
+        use_container_width=True,
+        hide_index=True,
     )
-    for total_key in (
-        "nightly_rate_eur",
-        "room_total_eur",
-        "transport_unit_price_egp",
-        "transport_unit_price_eur",
-        "transport_billed_units",
-        "transport_pricing_label",
-        "transport_rate_version",
-        "transport_price_per_person_eur",
-        "transport_total_eur",
-        "transport_total_egp",
-        "grand_total_eur",
-        "grand_total_usd",
-        "grand_total_egp",
-    ):
-        if total_key in result.data:
-            record[total_key] = result.data[total_key]
-    st.session_state.last_booking = record
-    st.session_state.booking_submitted = True
-    st.session_state.pending_submission = None
-    st.session_state.pending_error = ""
-    st.rerun()
+    st.markdown(f'<div class="total-box">Grand Total: {money(total)}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-
-render_header()
-render_navigation()
-
-
-if st.session_state.current_page == "Personal":
-    section_title(
-        "📝", "Personal Details", "Enter the information exactly as it appears on the passport."
-    )
-    st.text_input("Full Name *", key="guest_name")
-
-    country_names = [country.name for country in countries()]
-    if st.session_state.nationality not in country_names:
-        st.session_state.nationality = DEFAULT_COUNTRY.name
-    st.selectbox(
-        "Nationality / Country *",
-        country_names,
-        key="nationality",
-        on_change=_sync_country,
-    )
-    _sync_country()
-    selected_country = countries_by_name()[st.session_state.nationality]
-
-    phone_prefix_col, phone_number_col = st.columns([1, 3])
-    with phone_prefix_col:
-        st.text_input(
-            "Country Code",
-            value=selected_country.calling_code,
-            disabled=True,
-            key=f"phone_prefix_display_{selected_country.iso2}",
-        )
-    with phone_number_col:
-        st.text_input(
-            "Phone Number *",
-            key="phone_national",
-            placeholder="Enter the national or international number",
-        )
-
-    phone_valid, formatted_phone, phone_message = validate_phone(
-        selected_country.iso2, st.session_state.phone_national
-    )
-    st.session_state.phone_valid = phone_valid
-    st.session_state.phone = formatted_phone if phone_valid else ""
-    if st.session_state.phone_national:
-        if phone_valid:
-            st.success(f"Phone: {formatted_phone}")
-        else:
-            st.error(phone_message)
-
-    st.text_input("Email *", key="email")
-
-    section_title("📷", "Personal Documents")
-    st.caption(f"JPG/JPEG/PNG only. Maximum {MAX_IMAGE_SIZE_MB} MB per image.")
-    photo_col, passport_col = st.columns(2)
-    with photo_col:
-        personal_label = "Personal / Profile Photo" + (" *" if REQUIRE_PERSONAL_PHOTO else "")
-        personal_upload = st.file_uploader(
-            personal_label, type=["jpg", "jpeg", "png"], key="personal_photo_upload"
-        )
-        _process_upload(personal_upload, "personal_photo")
-        if st.session_state.personal_photo:
-            st.image(st.session_state.personal_photo["data"], caption="Personal photo preview")
-            st.button(
-                "Remove personal photo",
-                on_click=_remove_upload,
-                args=("personal_photo", "personal_photo_upload"),
-                use_container_width=True,
-            )
-    with passport_col:
-        passport_label = "Passport Photo" + (" *" if REQUIRE_PASSPORT_PHOTO else "")
-        passport_upload = st.file_uploader(
-            passport_label, type=["jpg", "jpeg", "png"], key="passport_photo_upload"
-        )
-        _process_upload(passport_upload, "passport_photo")
-        if st.session_state.passport_photo:
-            st.image(st.session_state.passport_photo["data"], caption="Passport photo preview")
-            st.button(
-                "Remove passport photo",
-                on_click=_remove_upload,
-                args=("passport_photo", "passport_photo_upload"),
-                use_container_width=True,
-            )
-
-
-elif st.session_state.current_page == "Hotel":
-    section_title(
-        "🏨",
-        "Hotel & Room Selection",
-        "Choose the dates and the application will calculate the number of nights automatically.",
-    )
-    _normalize_hotel_state()
-    st.selectbox("Select Hotel *", list(HOTELS), key="hotel", on_change=_normalize_hotel_state)
-    _normalize_hotel_state()
-    hotel_info = HOTELS[st.session_state.hotel]
-
-    with st.expander("🏨 Hotel Details", expanded=False):
-        st.write(f"⭐ Stars: {hotel_info['stars']}")
-        st.write(f"📍 Distance to Arena: {hotel_info['distance_to_arena']}")
-        st.write(f"📌 Location: {hotel_info['location']}")
-        if hotel_info.get("website"):
-            st.markdown(f"🌐 [Hotel website]({hotel_info['website']})")
-        if hotel_info.get("notes"):
-            st.write(f"📝 {hotel_info['notes']}")
-
-    plans = list(hotel_info["rates"])
-    if st.session_state.meal_plan not in plans:
-        st.session_state.meal_plan = plans[0]
-    st.radio(
-        "Meal Plan *",
-        plans,
-        key="meal_plan",
-        horizontal=True,
-        on_change=_normalize_hotel_state,
-    )
-
-    rooms = list(hotel_info["rates"][st.session_state.meal_plan])
-    if st.session_state.room_type not in rooms:
-        st.session_state.room_type = rooms[0]
-    room_col, guests_col = st.columns(2)
-    with room_col:
-        st.selectbox(
-            "Room Type *",
-            rooms,
-            key="room_type",
-            on_change=_sync_guests_to_room,
-        )
-    with guests_col:
-        _sync_guests_to_room()
-        st.number_input(
-            "Number of Guests (Automatic) *",
-            min_value=1,
-            max_value=max(ROOM_OCCUPANCY.values()),
-            step=1,
-            key="guests",
-            disabled=True,
-            help="Automatically set from the selected room type.",
-        )
-
-    date_col1, date_col2 = st.columns(2)
-    with date_col1:
-        st.date_input("Check-in Date *", key="check_in", on_change=_ensure_checkout)
-    with date_col2:
-        st.date_input("Check-out Date *", key="check_out")
-
-    nights = current_nights()
-    if nights < 1:
-        st.error("Check-out date must be after check-in date.")
-    elif nights > MAX_BOOKING_NIGHTS:
-        st.error(f"A booking cannot exceed {MAX_BOOKING_NIGHTS} nights.")
-    else:
-        st.success(f"Number of nights: {nights}")
-
-    totals = current_totals()
-    st.caption(
-        f"Official nightly rate: {format_currency(totals['nightly_rate_eur'], 'EUR')} - "
-        "EUR is the base currency."
-    )
-    render_price_box(totals)
-
-
-elif st.session_state.current_page == "Transportation":
-    section_title(
-        "🚐",
-        "Transportation",
-        "Select the service, vehicle and number of persons.",
-    )
-    st.checkbox("I need transportation", key="wants_transportation")
-    if st.session_state.wants_transportation:
-        _normalize_transport_state()
-        st.selectbox(
-            "Service Type *",
-            list(TRANSPORT_SERVICES),
-            format_func=lambda value: TRANSPORT_SERVICES[value],
-            key="transport_service",
-        )
-        vehicle_names = list(TRANSPORTATION)
-        if st.session_state.vehicle_type not in vehicle_names:
-            st.session_state.vehicle_type = vehicle_names[0]
-        transport_col1, transport_col2 = st.columns(2)
-        with transport_col1:
-            st.selectbox("Vehicle Type *", vehicle_names, key="vehicle_type")
-        with transport_col2:
-            allowed_modes = TRANSPORTATION[st.session_state.vehicle_type]["pricing_modes"]
-            if st.session_state.transport_pricing_mode not in allowed_modes:
-                st.session_state.transport_pricing_mode = allowed_modes[0]
-            st.selectbox(
-                "Pricing Method *",
-                list(allowed_modes),
-                format_func=lambda value: TRANSPORT_PRICING_LABELS[value],
-                key="transport_pricing_mode",
-            )
-
-        count_col1, count_col2 = st.columns(2)
-        with count_col1:
-            st.number_input(
-                "Number of Persons *", min_value=1, max_value=500, step=1, key="transport_persons"
-            )
-        with count_col2:
-            if st.session_state.transport_pricing_mode == "per_vehicle":
-                st.number_input(
-                    "Number of Vehicles *",
-                    min_value=1,
-                    max_value=50,
-                    step=1,
-                    key="transport_vehicle_count",
-                )
-            else:
-                capacity = TRANSPORTATION[st.session_state.vehicle_type].get("capacity")
-                st.text_input(
-                    "Charging Basis",
-                    value=(f"Per person - {capacity}-seat bus" if capacity else "Per person"),
-                    disabled=True,
-                )
-
-        totals = current_totals()
-        if totals.get("transport_price_pending"):
-            st.warning(
-                "This transportation price is pending and cannot be confirmed yet."
-            )
-        else:
-            basis = str(totals.get("transport_pricing_label") or "")
-            st.info(
-                f"{basis} rate: "
-                f"{format_currency(float(totals['transport_unit_price_eur']), 'EUR')} "
-                f"({format_currency(float(totals['transport_unit_price_egp']), 'EGP')}). "
-                f"Transportation total: "
-                f"{format_currency(float(totals['transport_total_eur']), 'EUR')} / "
-                f"{format_currency(float(totals['transport_total_egp']), 'EGP')}"
-            )
-            if st.session_state.transport_pricing_mode == "per_person":
-                st.caption(
-                    "Preliminary per-person rate calculated from the quoted full-bus price "
-                    "divided by the seat count."
-                )
-        render_price_box(totals)
-    else:
-        st.info("No transportation selected. You can return here at any time.")
-
-
-elif st.session_state.current_page == "Review":
-    section_title("🔎", "Review Your Booking", "Review all details before completing the booking.")
-    raw = booking_from_state()
-    errors = validate_booking(raw)
-    if errors:
-        st.warning("The preview is available, but the following items must be fixed before submission:")
-        for error in errors:
-            st.write(f"- {error}")
-
-    st.subheader("Personal Details")
-    detail_col1, detail_col2 = st.columns(2)
-    with detail_col1:
-        st.write(f"Name: {raw['guest_name'] or '-'}")
-        st.write(f"Nationality: {raw['nationality'] or '-'}")
-    with detail_col2:
-        st.write(f"Phone: {raw['phone'] or '-'}")
-        st.write(f"Email: {raw['email'] or '-'}")
-
-    image_col1, image_col2 = st.columns(2)
-    with image_col1:
-        if raw["personal_photo"]:
-            st.image(raw["personal_photo"]["data"], caption="Personal photo")
-        else:
-            st.caption("Personal photo: not uploaded")
-    with image_col2:
-        if raw["passport_photo"]:
-            st.image(raw["passport_photo"]["data"], caption="Passport photo")
-        else:
-            st.caption("Passport photo: not uploaded")
-
-    st.subheader("Hotel")
-    st.write(f"Hotel: {raw['hotel']}")
-    st.write(f"Meal plan: {raw['meal_plan']}")
-    st.write(f"Room type: {raw['room_type']}")
-    st.write(f"Guests: {raw['guests']}")
-    st.write(f"Check-in: {raw['check_in'].isoformat()}")
-    st.write(f"Check-out: {raw['check_out'].isoformat()}")
-    st.write(f"Nights: {raw['nights']}")
-
-    st.subheader("Transportation")
-    if raw["wants_transportation"]:
-        st.write(f"Service: {raw['transport_service']}")
-        st.write(f"Vehicle: {raw['vehicle_type']}")
-        st.write(f"Pricing method: {raw['transport_pricing_label']}")
-        st.write(f"Persons: {raw['transport_persons']}")
-        if raw["transport_pricing_mode"] == "per_vehicle":
-            st.write(f"Vehicles: {raw['transport_vehicle_count']}")
-        if raw.get("transport_price_pending"):
-            st.write("Transportation rate: Pending")
-        else:
-            st.write(
-                "Unit rate: "
-                f"{format_currency(raw['transport_unit_price_eur'], 'EUR')} / "
-                f"{format_currency(raw['transport_unit_price_egp'], 'EGP')}"
-            )
-            st.write(
-                "Transportation total: "
-                f"{format_currency(raw['transport_total_eur'], 'EUR')} / "
-                f"{format_currency(raw['transport_total_egp'], 'EGP')}"
-            )
-    else:
-        st.write("Not requested")
-    render_price_box(raw)
-
-
-elif st.session_state.current_page == "Complete":
-    section_title("✅", "Complete Booking", "The booking is confirmed only after Google Sheets saves it.")
-
-    if st.session_state.booking_submitted and st.session_state.last_booking:
-        booking = st.session_state.last_booking
-        st.success(f"Booking saved successfully. Booking ID: **{booking['booking_id']}**")
-        if booking.get("invoice_no"):
-            st.info(f"Invoice No: **{booking['invoice_no']}**")
-        if booking.get("invoice_verification_code"):
-            st.caption(f"Verification Code: {booking['invoice_verification_code']}")
-        if not booking.get("files_ok", True):
-            st.warning(
-                "The registration row was saved, but one or more images could not be uploaded. "
-                "Please contact the organizer and quote the Booking ID."
-            )
-        if not booking.get("invoice_created", False):
-            st.warning(
-                "The booking was saved, but the invoice PDF could not be stored. "
-                "Please contact the organizer and quote the Booking ID."
-            )
-        elif booking.get("customer_email_sent", False):
-            st.success(f"The invoice was emailed to {booking.get('email', 'the customer')}.")
-        else:
-            st.warning(
-                "The booking and invoice were saved, but email delivery failed. "
-                "The failure is recorded in Google Sheets and can be retried."
-            )
-            if booking.get("email_error"):
-                st.caption(str(booking["email_error"]))
-        try:
-            pdf_data = booking.get("invoice_pdf_bytes") or generate_pdf(booking)
-            st.download_button(
-                "📄 Download Invoice PDF",
-                data=pdf_data,
-                file_name=f"{booking.get('invoice_no') or booking['booking_id']}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        except Exception as exc:
-            st.warning("The booking is saved, but the invoice PDF could not be generated here.")
-            st.caption(str(exc))
-
-        if st.button("Start a New Booking", use_container_width=True):
-            st.session_state.clear()
+    col_back, col_next = st.columns(2)
+    with col_back:
+        if st.button("← Back", use_container_width=True):
+            st.session_state.page = "transport"
             st.rerun()
 
-    else:
-        raw = booking_from_state()
-        errors = validate_booking(raw)
-        if errors:
-            for error in errors:
-                st.error(error)
+    submit = False
+    if not preview_mode:
+        with col_next:
+            confirm = st.checkbox("I confirm that the information above is correct.")
+            submit = st.button("Confirm Booking & Generate Invoice", type="primary", use_container_width=True)
 
-        if not backend_is_configured():
-            st.warning(
-                "Google Sheets is not configured yet. Complete the Apps Script and Streamlit "
-                "secrets steps in README.md before accepting real registrations."
-            )
+    if submit:
+        if not confirm:
+            st.error("Please confirm that the information is correct.")
+            st.stop()
 
-        if st.session_state.pending_submission:
-            booking_id = st.session_state.pending_submission["record"]["booking_id"]
-            st.warning(
-                f"Booking {booking_id} has not been saved yet. It remains ready for a safe retry "
-                "with the same ID, so retrying will not create a duplicate."
-            )
-            if st.session_state.pending_error:
-                st.error(st.session_state.pending_error)
-            if st.button("Retry Saving", type="primary", use_container_width=True):
-                attempt_pending_save()
-            if st.button("Cancel This Unsaved Attempt", use_container_width=True):
-                st.session_state.pending_submission = None
-                st.session_state.pending_error = ""
+        with st.spinner("Checking your information..."):
+            is_duplicate, dup_error = check_duplicate(p["passport_no"])
+        if dup_error:
+            st.warning("Automatic duplicate checking is temporarily unavailable. The booking will continue and may be reviewed manually.")
+        if is_duplicate:
+            st.error("This passport number is already registered. If this is an error, please contact us.")
+            st.stop()
+
+        booking_id, invoice_no = generate_ids()
+
+        payload_data = {
+            "booking_id": booking_id,
+            "invoice_no": invoice_no,
+            "full_name": p["full_name"],
+            "passport_no": p["passport_no"],
+            "nationality": p["nationality"],
+            "dob": p["dob"],
+            "email": p["email"],
+            "phone": p["phone"],
+            "hotel": h["hotel"],
+            "room_type": h["room_type"],
+            "guests": h["guests"],
+            "check_in": h["check_in"],
+            "check_out": h["check_out"],
+            "nights": h["nights"],
+            "meal_plan": h["meal_plan"],
+            "lunch_selected": h["lunch_selected"],
+            "lunch_unit_price": h["lunch_unit_price"],
+            "lunch_total": h["lunch_total"],
+            "dinner_selected": h["dinner_selected"],
+            "dinner_unit_price": h["dinner_unit_price"],
+            "dinner_total": h["dinner_total"],
+            "transport": t["transport"],
+            "transport_qty": t["qty"],
+            "total": total,
+            "items": items,
+        }
+
+        with st.spinner("Creating your booking and invoice..."):
+            try:
+                pdf_bytes = create_invoice_pdf(payload_data)
+
+                request_payload = {
+                    "action": "create_booking",
+                    "api_token": secret("BOOKING_API_TOKEN", ""),
+                    "booking": payload_data,
+                    "passport_base64": base64.b64encode(p["passport_bytes"]).decode("ascii"),
+                    "passport_filename": p["passport_name"],
+                    "invoice_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+                    "invoice_filename": f"{invoice_no}.pdf",
+                }
+
+                backend_result = backend_post(request_payload, timeout=45)
+
+                if backend_result.get("duplicate") is True:
+                    st.session_state.booking_id = booking_id
+                else:
+                    st.session_state.booking_id = booking_id
+                st.session_state.invoice_no = invoice_no
+                st.session_state.invoice_pdf = pdf_bytes
+                st.session_state.last_backend_error = None
+                st.session_state.page = "success"
                 st.rerun()
-        elif st.button(
-            "✅ Complete Booking", type="primary", use_container_width=True, disabled=bool(errors)
-        ):
-            record = submission_record(raw)
-            st.session_state.pending_submission = {
-                "record": record,
-                "personal_photo": raw.get("personal_photo"),
-                "passport_photo": raw.get("passport_photo"),
-            }
-            st.session_state.pending_error = ""
-            attempt_pending_save()
+
+            except Exception as exc:
+                err_msg = str(exc)
+                if "already registered" in err_msg.lower():
+                    # رفض حقيقي من السيرفر لأن رقم الجواز مسجل قبل كده —
+                    # مش مشكلة إرسال، فمفيش داعي لعرض نسخة احتياطية هنا.
+                    st.error("This passport number is already registered. The booking was stopped to prevent duplicate registration.")
+                else:
+                    # البيانات لسه محفوظة في session_state — المستخدم يقدر يحاول تاني
+                    # من غير ما يعيد كتابة أي حاجة، وده اللي بيمنع ضياع التسجيلات.
+                    st.session_state.last_backend_error = err_msg
+                    st.session_state.pending_payload = payload_data
+                    st.session_state.pending_pdf = pdf_bytes if "pdf_bytes" in dir() else None
+                    st.error("The booking could not be submitted due to a transmission error. Your entered data is preserved and you can try again.")
+
+    if st.session_state.get("last_backend_error"):
+        with st.expander("Technical error details (for support)"):
+            st.code(st.session_state.last_backend_error)
+            if st.session_state.get("pending_payload"):
+                backup_json = json.dumps(st.session_state.pending_payload, ensure_ascii=False, indent=2)
+                st.download_button(
+                    "⬇️ Download Booking Backup",
+                    data=backup_json.encode("utf-8"),
+                    file_name=f"{st.session_state.pending_payload.get('booking_id','booking')}_backup.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
+
+# =========================================================
+# PAGE 5 — SUCCESS
+# =========================================================
+elif st.session_state.page == "success":
+    if not st.session_state.booking_id:
+        st.info("Preview mode: this is the completion page design. No booking has been submitted.")
+        st.markdown('<div class="booking-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">🎉 Booking Completed</div>', unsafe_allow_html=True)
+        st.write("**Booking ID:** BK-PREVIEW123")
+        st.write("**Invoice Number:** INV-PREVIEW123")
+        st.write("The real confirmation and invoice download appear here after a successful booking.")
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.balloons()
+        st.success("🎉 Booking completed successfully!")
+
+    st.markdown('<div class="booking-card">', unsafe_allow_html=True)
+    st.write(f"**Booking ID:** {st.session_state.booking_id}")
+    st.write(f"**Invoice Number:** {st.session_state.invoice_no}")
+    st.info("The invoice has been sent to the registered email address.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if st.session_state.booking_id and st.session_state.invoice_pdf:
+        st.download_button(
+            "📄 Download Invoice",
+            data=st.session_state.invoice_pdf,
+            file_name=f"{st.session_state.invoice_no}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    if st.session_state.booking_id and st.button("Create New Booking", use_container_width=True):
+        for key in [
+            "personal", "hotel", "transport", "booking_id",
+            "invoice_no", "invoice_pdf", "last_backend_error", "pending_payload", "pending_pdf",
+        ]:
+            st.session_state.pop(key, None)
+        st.session_state.page = "personal"
+        st.rerun()
+
+st.markdown(f'<div class="footer-note">{COMPANY_NAME} — {COMPANY_EMAIL}</div>', unsafe_allow_html=True)
+
+# =========================================================
+# ADMIN
+# =========================================================
+st.sidebar.divider()
+st.sidebar.subheader("🔐 Admin Panel")
+
+admin_password = st.sidebar.text_input("Admin Password", type="password")
+
+if ADMIN_PASSWORD and admin_password == ADMIN_PASSWORD:
+    st.sidebar.success("Successfully logged in")
+
+    if st.sidebar.button("Load Bookings"):
+        try:
+            result = backend_post({
+                "action": "admin_list",
+                "admin_token": ADMIN_TOKEN,
+            })
+            rows = result.get("rows", [])
+            if rows:
+                st.sidebar.success(f"Loaded {len(rows)} bookings.")
+                st.session_state.admin_rows = rows
+            else:
+                st.sidebar.info("No bookings found.")
+        except Exception as exc:
+            st.sidebar.error("Could not load bookings.")
+            st.sidebar.caption(str(exc))
+
+    if "admin_rows" in st.session_state:
+        st.subheader("📋 Booking Dashboard")
+        df = pd.DataFrame(st.session_state.admin_rows)
+
+        search = st.text_input("🔍 Search (name, passport number, or email)")
+        if search and not df.empty:
+            mask = df.apply(lambda row: row.astype(str).str.contains(search, case=False, na=False).any(), axis=1)
+            df_view = df[mask]
+        else:
+            df_view = df
+
+        st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+        if "total" in df.columns:
+            try:
+                grand_total = pd.to_numeric(df["total"], errors="coerce").sum()
+                st.markdown(
+                    f'<div class="total-box">Total All Bookings: {money(grand_total)}</div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                pass
+
+        csv = df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "⬇️ Download Bookings CSV",
+            csv,
+            "bookings.csv",
+            "text/csv",
+            use_container_width=True,
+        )
