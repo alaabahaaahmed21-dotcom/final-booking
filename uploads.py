@@ -11,8 +11,10 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from config import (
     MAX_IMAGE_PIXELS,
     MAX_IMAGE_SIZE_MB,
-    PROCESSED_IMAGE_MAX_DIMENSION,
-    PROCESSED_IMAGE_TARGET_MB,
+    PASSPORT_PHOTO_MAX_DIMENSION,
+    PASSPORT_PHOTO_TARGET_MB,
+    PERSONAL_PHOTO_MAX_DIMENSION,
+    PERSONAL_PHOTO_TARGET_MB,
 )
 
 
@@ -34,14 +36,18 @@ def _rgb_image(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
-def _compress_for_drive(data: bytes) -> tuple[bytes, int, int]:
+def _compress_for_drive(
+    data: bytes,
+    target_mb: float,
+    max_dimension: int,
+) -> tuple[bytes, int, int]:
     """Return a readable, sanitized JPEG small enough for reliable uploads."""
 
-    target_bytes = int(PROCESSED_IMAGE_TARGET_MB * 1024 * 1024)
+    target_bytes = int(target_mb * 1024 * 1024)
     with Image.open(io.BytesIO(data)) as source:
         image = _rgb_image(source)
         image.thumbnail(
-            (PROCESSED_IMAGE_MAX_DIMENSION, PROCESSED_IMAGE_MAX_DIMENSION),
+            (max_dimension, max_dimension),
             Image.Resampling.LANCZOS,
         )
 
@@ -88,7 +94,10 @@ def _compress_for_drive(data: bytes) -> tuple[bytes, int, int]:
     return encoded, image.width, image.height
 
 
-def validate_uploaded_image(uploaded_file: Any) -> dict[str, Any]:
+def validate_uploaded_image(
+    uploaded_file: Any,
+    image_kind: str = "passport_photo",
+) -> dict[str, Any]:
     """Validate a Streamlit upload and return safe, reusable image bytes."""
 
     if uploaded_file is None:
@@ -123,7 +132,17 @@ def validate_uploaded_image(uploaded_file: Any) -> dict[str, Any]:
     if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
         raise ValueError("The image dimensions are too large or invalid.")
 
-    processed, processed_width, processed_height = _compress_for_drive(data)
+    if image_kind == "personal_photo":
+        target_mb = PERSONAL_PHOTO_TARGET_MB
+        max_dimension = PERSONAL_PHOTO_MAX_DIMENSION
+    else:
+        target_mb = PASSPORT_PHOTO_TARGET_MB
+        max_dimension = PASSPORT_PHOTO_MAX_DIMENSION
+    processed, processed_width, processed_height = _compress_for_drive(
+        data,
+        target_mb,
+        max_dimension,
+    )
     try:
         with Image.open(io.BytesIO(processed)) as verified:
             verified.verify()
