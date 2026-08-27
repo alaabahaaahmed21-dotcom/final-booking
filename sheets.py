@@ -55,8 +55,13 @@ def _quote_message(booking: dict[str, Any]) -> str:
             str(int(booking.get("nights") or 0)),
             "1" if wants_transport else "0",
             str(booking.get("vehicle_type") or "-") if wants_transport else "-",
+            str(booking.get("transport_service") or "-") if wants_transport else "-",
+            str(booking.get("transport_pricing_mode") or "-") if wants_transport else "-",
             str(int(booking.get("transport_persons") or 0)) if wants_transport else "0",
-            _money(booking.get("transport_price_per_person_eur")),
+            str(int(booking.get("transport_vehicle_count") or 0)) if wants_transport else "0",
+            _money(booking.get("transport_unit_price_egp")),
+            _money(booking.get("transport_unit_price_eur")),
+            str(booking.get("transport_rate_version") or "-") if wants_transport else "-",
         ]
     )
 

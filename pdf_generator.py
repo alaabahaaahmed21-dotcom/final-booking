@@ -145,13 +145,31 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
         ["Check-out", _safe(booking.get("check_out"))],
         ["Nights", _safe(booking.get("nights"))],
         ["Vehicle", _safe(booking.get("vehicle_type"))],
+        ["Transportation Service", _safe(booking.get("transport_service"))],
+        ["Pricing Method", _safe(booking.get("transport_pricing_label"))],
         ["Transportation Persons", _safe(booking.get("transport_persons"))],
         [
-            "Transportation Price / Person",
-            _money(booking.get("transport_price_per_person_eur"), "EUR"),
+            "Number of Vehicles",
+            _safe(
+                booking.get("transport_vehicle_count")
+                if booking.get("transport_pricing_mode") == "per_vehicle"
+                else None
+            ),
+        ],
+        ["Billed Units", _safe(booking.get("transport_billed_units"))],
+        [
+            "Transportation Unit Rate",
+            _money(booking.get("transport_unit_price_eur"), "EUR")
+            + " / "
+            + _money(booking.get("transport_unit_price_egp"), "EGP"),
         ],
         ["Room Total", _money(booking.get("room_total_eur"), "EUR")],
-        ["Transportation Total", _money(booking.get("transport_total_eur"), "EUR")],
+        [
+            "Transportation Total",
+            _money(booking.get("transport_total_eur"), "EUR")
+            + " / "
+            + _money(booking.get("transport_total_egp"), "EGP"),
+        ],
         ["Grand Total", _money(booking.get("grand_total_eur"), "EUR")],
         ["USD Equivalent", _money(booking.get("grand_total_usd"), "USD")],
         ["EGP Equivalent", _money(booking.get("grand_total_egp"), "EGP")],

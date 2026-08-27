@@ -30,22 +30,24 @@ class BookingCalculationsTest(unittest.TestCase):
         self.assertEqual(totals["grand_total_eur"], 330.0)
         self.assertGreater(totals["grand_total_usd"], totals["grand_total_eur"])
 
-    def test_transport_is_price_per_person_in_eur(self):
+    def test_hiace_is_billed_per_person_using_15_seats(self):
         totals = calculate_booking_totals(
             "Hilton Cairo Heliopolis",
             "Breakfast",
             "Double",
             3,
             True,
-            "Hiace Bus",
-            4,
-            {"Hiace Bus": 12.5},
+            "Hiace (15 Seats)",
+            transport_persons=3,
+            transport_service="Full Day Within Cairo",
+            transport_pricing_mode="per_person",
         )
-        self.assertEqual(totals["transport_price_per_person_eur"], 12.5)
-        self.assertEqual(totals["transport_total_eur"], 50.0)
-        self.assertEqual(totals["grand_total_eur"], 380.0)
+        self.assertEqual(totals["transport_unit_price_eur"], 6.666667)
+        self.assertEqual(totals["transport_total_egp"], 1120.0)
+        self.assertEqual(totals["transport_total_eur"], 20.0)
+        self.assertEqual(totals["grand_total_eur"], 350.0)
 
-    def test_transport_price_can_remain_pending(self):
+    def test_limousine_is_billed_by_vehicle(self):
         totals = calculate_booking_totals(
             "Hilton Cairo Heliopolis",
             "Breakfast",
@@ -53,10 +55,29 @@ class BookingCalculationsTest(unittest.TestCase):
             1,
             True,
             "Limousine",
-            2,
-            {"Limousine": None},
+            transport_persons=2,
+            transport_service="One-way Transfer - Airport to Stadium or Hotel",
+            transport_pricing_mode="per_vehicle",
+            transport_vehicle_count=2,
         )
-        self.assertTrue(totals["transport_price_pending"])
+        self.assertFalse(totals["transport_price_pending"])
+        self.assertEqual(totals["transport_unit_price_eur"], 23.214286)
+        self.assertEqual(totals["transport_total_eur"], 46.43)
+
+    def test_coaster_is_billed_per_person_using_30_seats(self):
+        totals = calculate_booking_totals(
+            "Hilton Cairo Heliopolis",
+            "Breakfast",
+            "Double",
+            1,
+            True,
+            "Coaster (30 Seats)",
+            transport_persons=30,
+            transport_service="One-way Transfer - Airport to Stadium or Hotel",
+            transport_pricing_mode="per_person",
+        )
+        self.assertEqual(totals["transport_unit_price_eur"], 1.815476)
+        self.assertEqual(totals["transport_total_eur"], 54.46)
 
     def test_egyptian_phone_is_normalized(self):
         egypt = country_for_code("EG")
