@@ -6,15 +6,86 @@ import base64
 import io
 from typing import Any
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-from config import MAX_IMAGE_PIXELS, MAX_IMAGE_SIZE_MB
+from config import (
+    MAX_IMAGE_PIXELS,
+    MAX_IMAGE_SIZE_MB,
+    PROCESSED_IMAGE_MAX_DIMENSION,
+    PROCESSED_IMAGE_TARGET_MB,
+)
 
 
 ALLOWED_FORMATS = {
     "JPEG": ("image/jpeg", "jpg"),
     "PNG": ("image/png", "png"),
 }
+
+
+def _rgb_image(image: Image.Image) -> Image.Image:
+    """Apply phone orientation and flatten transparency on a white background."""
+
+    image = ImageOps.exif_transpose(image)
+    if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, "white")
+        background.alpha_composite(rgba)
+        return background.convert("RGB")
+    return image.convert("RGB")
+
+
+def _compress_for_drive(data: bytes) -> tuple[bytes, int, int]:
+    """Return a readable, sanitized JPEG small enough for reliable uploads."""
+
+    target_bytes = int(PROCESSED_IMAGE_TARGET_MB * 1024 * 1024)
+    with Image.open(io.BytesIO(data)) as source:
+        image = _rgb_image(source)
+        image.thumbnail(
+            (PROCESSED_IMAGE_MAX_DIMENSION, PROCESSED_IMAGE_MAX_DIMENSION),
+            Image.Resampling.LANCZOS,
+        )
+
+    quality_steps = (88, 84, 80, 76, 72, 68)
+    encoded = b""
+    for quality in quality_steps:
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+            progressive=True,
+            subsampling=0,
+        )
+        encoded = buffer.getvalue()
+        if len(encoded) <= target_bytes:
+            break
+
+    # Very detailed scans may still be large.  Reduce dimensions gradually,
+    # never below 1200 px on the longest edge so passport text stays readable.
+    while len(encoded) > target_bytes and max(image.size) > 1200:
+        scale = max(1200 / max(image.size), 0.88)
+        next_size = (
+            max(1, int(image.width * scale)),
+            max(1, int(image.height * scale)),
+        )
+        image = image.resize(next_size, Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=72,
+            optimize=True,
+            progressive=True,
+            subsampling=0,
+        )
+        encoded = buffer.getvalue()
+
+    if len(encoded) > target_bytes:
+        raise ValueError(
+            "The image could not be compressed safely. Please upload a clearer, smaller photo."
+        )
+    return encoded, image.width, image.height
 
 
 def validate_uploaded_image(uploaded_file: Any) -> dict[str, Any]:
@@ -52,14 +123,21 @@ def validate_uploaded_image(uploaded_file: Any) -> dict[str, Any]:
     if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
         raise ValueError("The image dimensions are too large or invalid.")
 
-    mime_type, extension = ALLOWED_FORMATS[image_format]
+    processed, processed_width, processed_height = _compress_for_drive(data)
+    try:
+        with Image.open(io.BytesIO(processed)) as verified:
+            verified.verify()
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise ValueError("The image could not be prepared for upload.") from exc
+
     return {
-        "data": data,
-        "mime_type": mime_type,
-        "extension": extension,
-        "size_bytes": len(data),
-        "width": width,
-        "height": height,
+        "data": processed,
+        "mime_type": "image/jpeg",
+        "extension": "jpg",
+        "size_bytes": len(processed),
+        "original_size_bytes": len(data),
+        "width": processed_width,
+        "height": processed_height,
     }
 
 
