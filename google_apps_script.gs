@@ -12,16 +12,47 @@ const BOOKING_HEADERS = [
   "Phone Country Code", "Phone", "Email", "Personal Photo File ID", "Personal Photo URL",
   "Passport Photo File ID", "Passport Photo URL", "Hotel", "Meal Plan", "Room Type",
   "Guests", "Check-in", "Check-out", "Nights", "Nightly Rate EUR", "Vehicle Type",
-  "Transportation Persons", "Transportation Price Per Person EUR", "Room Total EUR",
-  "Transportation Total EUR", "Grand Total EUR", "Grand Total USD", "Grand Total EGP",
+  "Transportation Service", "Transportation Pricing Mode", "Transportation Persons",
+  "Transportation Vehicle Count", "Transportation Billed Units",
+  "Transportation Unit Price EGP", "Transportation Unit Price EUR",
+  "Transportation Rate Version", "Transportation Price Per Person EUR", "Room Total EUR",
+  "Transportation Total EUR", "Transportation Total EGP", "Grand Total EUR",
+  "Grand Total USD", "Grand Total EGP",
   "Invoice No", "Invoice File ID", "Invoice URL", "Invoice Verification Code", "Invoice SHA-256",
   "Customer Email Sent", "Email Sent At",
   "Processing Started", "Status", "Last Error"
 ];
 
 const TRANSPORT_VEHICLES = [
-  "Limousine", "Hiace Bus", "Coaster Bus", "33-Seat Bus", "50-Seat Bus"
+  "Limousine", "Hiace (15 Seats)", "Coaster (30 Seats)", "33-Seat Bus", "50-Seat Bus"
 ];
+
+const TRANSPORT_RATE_VERSION =
+  "2026-08-27 quotation - EUR preliminary rates";
+
+const TRANSPORT_RATES_EUR = {
+  "One-way Transfer - Airport to Stadium or Hotel": {
+    "Limousine": {mode: "per_vehicle", unit: 23.214286},
+    "Hiace (15 Seats)": {mode: "per_person", unit: 2.500000},
+    "Coaster (30 Seats)": {mode: "per_person", unit: 1.815476},
+    "33-Seat Bus": {mode: "per_person", unit: 1.948052},
+    "50-Seat Bus": {mode: "per_person", unit: 2.321429}
+  },
+  "Full Day Within Cairo": {
+    "Limousine": {mode: "per_vehicle", unit: 80.357143},
+    "Hiace (15 Seats)": {mode: "per_person", unit: 6.666667},
+    "Coaster (30 Seats)": {mode: "per_person", unit: 3.690476},
+    "33-Seat Bus": {mode: "per_person", unit: 4.112554},
+    "50-Seat Bus": {mode: "per_person", unit: 4.714286}
+  },
+  "Evening Service": {
+    "Limousine": {mode: "per_vehicle", unit: 32.142857},
+    "Hiace (15 Seats)": {mode: "per_person", unit: 2.976190},
+    "Coaster (30 Seats)": {mode: "per_person", unit: 1.785714},
+    "33-Seat Bus": {mode: "per_person", unit: 1.893939},
+    "50-Seat Bus": {mode: "per_person", unit: 1.892857}
+  }
+};
 
 const INVOICE_HEADERS = [
   "Invoice No", "Booking ID", "Created At", "Customer Name", "Customer Email",
@@ -228,6 +259,8 @@ function createBooking_(booking, images, quoteSignature, invoicePayload) {
 
 function recalculateBooking_(booking, quoteSignature) {
   verifyQuoteSignature_(booking, quoteSignature);
+  const suppliedTransportTotalEur = booking.transport_total_eur;
+  const suppliedGrandTotalEur = booking.grand_total_eur;
   booking.nights = nightsBetween_(booking.check_in, booking.check_out);
   if (booking.nights < 1 || booking.nights > 60) {
     throw codedError_("VALIDATION_ERROR", "Invalid number of nights.");
@@ -239,36 +272,66 @@ function recalculateBooking_(booking, quoteSignature) {
     throw codedError_("VALIDATION_ERROR", "Invalid hotel, meal plan or room type.");
   }
 
-  let transportUnit = 0;
-  let transportTotal = 0;
+  let transportUnitEgp = 0;
+  let transportUnitEur = 0;
+  let transportTotalEgp = 0;
+  let transportTotalEur = 0;
+  let transportBilledUnits = 0;
+  const eurToEgp = optionalNumberProp_("EUR_TO_EGP", 56);
   if (truthy_(booking.wants_transportation)) {
     if (TRANSPORT_VEHICLES.indexOf(String(booking.vehicle_type)) < 0) {
       throw codedError_("VALIDATION_ERROR", "Invalid vehicle type.");
+    }
+    const serviceRates = TRANSPORT_RATES_EUR[String(booking.transport_service || "")];
+    const selectedRate = serviceRates && serviceRates[String(booking.vehicle_type)];
+    if (!selectedRate) {
+      throw codedError_("VALIDATION_ERROR", "Invalid transportation service.");
+    }
+    if (String(booking.transport_pricing_mode || "") !== selectedRate.mode) {
+      throw codedError_("VALIDATION_ERROR", "Invalid transportation pricing method.");
     }
     const persons = Number(booking.transport_persons || 0);
     if (!Number.isInteger(persons) || persons < 1) {
       throw codedError_("VALIDATION_ERROR", "Invalid transportation person count.");
     }
-    const suppliedPrice = booking.transport_price_per_person_eur;
-    if (suppliedPrice === null || suppliedPrice === undefined || suppliedPrice === "") {
-      throw codedError_("TRANSPORT_PRICE_PENDING", "Transportation price is not set yet.");
+    const vehicleCount = Number(booking.transport_vehicle_count || 0);
+    if (selectedRate.mode === "per_vehicle" &&
+        (!Number.isInteger(vehicleCount) || vehicleCount < 1)) {
+      throw codedError_("VALIDATION_ERROR", "Invalid transportation vehicle count.");
     }
-    if (!isFinite(Number(suppliedPrice)) || Number(suppliedPrice) < 0) {
-      throw codedError_("VALIDATION_ERROR", "Invalid transportation price.");
-    }
-    transportUnit = money_(suppliedPrice);
-    transportTotal = money_(transportUnit * persons);
+    transportBilledUnits = selectedRate.mode === "per_person" ? persons : vehicleCount;
+    transportUnitEur = rate_(selectedRate.unit);
+    transportUnitEgp = money_(transportUnitEur * eurToEgp);
+    transportTotalEur = money_(Number(selectedRate.unit) * transportBilledUnits);
+    transportTotalEgp = money_(transportTotalEur * eurToEgp);
   }
 
   const roomTotal = money_(Number(rate) * booking.nights);
-  const grandEur = money_(roomTotal + transportTotal);
+  const grandEur = money_(roomTotal + transportTotalEur);
   booking.nightly_rate_eur = money_(rate);
   booking.room_total_eur = roomTotal;
-  booking.transport_price_per_person_eur = transportUnit;
-  booking.transport_total_eur = transportTotal;
+  booking.transport_unit_price_egp = transportUnitEgp;
+  booking.transport_unit_price_eur = transportUnitEur;
+  booking.transport_price_per_person_eur =
+    booking.transport_pricing_mode === "per_person" ? transportUnitEur : 0;
+  booking.transport_billed_units = transportBilledUnits;
+  booking.transport_total_eur = transportTotalEur;
+  booking.transport_total_egp = transportTotalEgp;
+  booking.transport_rate_version = TRANSPORT_RATE_VERSION;
   booking.grand_total_eur = grandEur;
-  booking.grand_total_usd = money_(grandEur * optionalNumberProp_("EUR_TO_USD", 1 / 0.92));
-  booking.grand_total_egp = money_(grandEur * optionalNumberProp_("EUR_TO_EGP", 49 / 0.92));
+  booking.grand_total_usd = money_(grandEur * optionalNumberProp_("EUR_TO_USD", 56 / 49.5));
+  booking.grand_total_egp = money_(roomTotal * eurToEgp + transportTotalEgp);
+
+  if (suppliedTransportTotalEur !== undefined && suppliedTransportTotalEur !== null &&
+      suppliedTransportTotalEur !== "" &&
+      Math.abs(Number(suppliedTransportTotalEur) - transportTotalEur) > 0.011) {
+    throw codedError_("QUOTE_CHANGED", "Transportation quote changed. Please review again.");
+  }
+  if (suppliedGrandTotalEur !== undefined && suppliedGrandTotalEur !== null &&
+      suppliedGrandTotalEur !== "" &&
+      Math.abs(Number(suppliedGrandTotalEur) - grandEur) > 0.011) {
+    throw codedError_("QUOTE_CHANGED", "Booking total changed. Please review again.");
+  }
 }
 
 
@@ -283,10 +346,18 @@ function bookingColumns_(booking) {
     "Check-out": booking.check_out, "Nights": booking.nights,
     "Nightly Rate EUR": money_(booking.nightly_rate_eur),
     "Vehicle Type": truthy_(booking.wants_transportation) ? booking.vehicle_type : "-",
+    "Transportation Service": truthy_(booking.wants_transportation) ? booking.transport_service : "-",
+    "Transportation Pricing Mode": truthy_(booking.wants_transportation) ? booking.transport_pricing_mode : "-",
     "Transportation Persons": truthy_(booking.wants_transportation) ? Number(booking.transport_persons || 0) : 0,
-    "Transportation Price Per Person EUR": money_(booking.transport_price_per_person_eur),
+    "Transportation Vehicle Count": truthy_(booking.wants_transportation) ? Number(booking.transport_vehicle_count || 0) : 0,
+    "Transportation Billed Units": truthy_(booking.wants_transportation) ? Number(booking.transport_billed_units || 0) : 0,
+    "Transportation Unit Price EGP": money_(booking.transport_unit_price_egp),
+    "Transportation Unit Price EUR": rate_(booking.transport_unit_price_eur),
+    "Transportation Rate Version": truthy_(booking.wants_transportation) ? booking.transport_rate_version : "-",
+    "Transportation Price Per Person EUR": rate_(booking.transport_price_per_person_eur),
     "Room Total EUR": money_(booking.room_total_eur),
     "Transportation Total EUR": money_(booking.transport_total_eur),
+    "Transportation Total EGP": money_(booking.transport_total_egp),
     "Grand Total EUR": money_(booking.grand_total_eur),
     "Grand Total USD": money_(booking.grand_total_usd),
     "Grand Total EGP": money_(booking.grand_total_egp)
@@ -525,8 +596,16 @@ function resultFromObject_(data, saved, filesOk, message) {
     email_error: truthy_(data["Customer Email Sent"]) ? "" : String(data["Last Error"] || ""),
     nightly_rate_eur: number_(data["Nightly Rate EUR"]),
     room_total_eur: number_(data["Room Total EUR"]),
+    transport_unit_price_egp: number_(data["Transportation Unit Price EGP"]),
+    transport_unit_price_eur: number_(data["Transportation Unit Price EUR"]),
+    transport_billed_units: number_(data["Transportation Billed Units"]),
+    transport_pricing_label: String(data["Transportation Pricing Mode"] || "") === "per_person"
+      ? "Per Person" : (String(data["Transportation Pricing Mode"] || "") === "per_vehicle"
+        ? "Full Vehicle" : "Not requested"),
+    transport_rate_version: String(data["Transportation Rate Version"] || ""),
     transport_price_per_person_eur: number_(data["Transportation Price Per Person EUR"]),
     transport_total_eur: number_(data["Transportation Total EUR"]),
+    transport_total_egp: number_(data["Transportation Total EGP"]),
     grand_total_eur: number_(data["Grand Total EUR"]),
     grand_total_usd: number_(data["Grand Total USD"]),
     grand_total_egp: number_(data["Grand Total EGP"]), message: message || ""
@@ -587,6 +666,11 @@ function money_(value) {
 }
 
 
+function rate_(value) {
+  return Math.round((Number(value) || 0) * 1000000) / 1000000;
+}
+
+
 function canonicalQuote_(booking) {
   const wantsTransport = truthy_(booking.wants_transportation);
   return [
@@ -594,8 +678,13 @@ function canonicalQuote_(booking) {
     String(booking.meal_plan || ""), String(booking.room_type || ""),
     String(Number(booking.nights || 0)), wantsTransport ? "1" : "0",
     wantsTransport ? String(booking.vehicle_type || "-") : "-",
+    wantsTransport ? String(booking.transport_service || "-") : "-",
+    wantsTransport ? String(booking.transport_pricing_mode || "-") : "-",
     wantsTransport ? String(Number(booking.transport_persons || 0)) : "0",
-    money_(booking.transport_price_per_person_eur).toFixed(2)
+    wantsTransport ? String(Number(booking.transport_vehicle_count || 0)) : "0",
+    money_(booking.transport_unit_price_egp).toFixed(2),
+    money_(booking.transport_unit_price_eur).toFixed(2),
+    wantsTransport ? String(booking.transport_rate_version || "-") : "-"
   ].join("\n");
 }
 
