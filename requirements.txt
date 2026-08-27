@@ -1,0 +1,8 @@
+streamlit>=1.40,<2
+requests>=2.31,<3
+Pillow>=10.4,<13
+reportlab>=4.2,<5
+arabic-reshaper>=3.0,<4
+python-bidi>=0.6,<1
+phonenumbers>=8.13,<10
+pycountry>=24.6,<25
