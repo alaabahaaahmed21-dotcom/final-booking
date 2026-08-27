@@ -142,8 +142,28 @@ button[data-testid="baseButton-primary"],
     background-image:none !important;
     color:#1F2937 !important;
     -webkit-text-fill-color:#1F2937 !important;
-    border-color:#D1D5DB !important;
     opacity:1 !important;
+}}
+
+/* One thin border on the outer field only; inner input stays borderless. */
+[data-baseweb="input"],
+[data-baseweb="textarea"],
+[data-baseweb="select"] > div {{
+    border:1px solid #D1D5DB !important;
+    box-shadow:none !important;
+}}
+[data-baseweb="base-input"],
+[data-testid="stAppViewContainer"] input:not([type="checkbox"]):not([type="radio"]),
+[data-testid="stAppViewContainer"] textarea {{
+    border:0 !important;
+    outline:0 !important;
+    box-shadow:none !important;
+}}
+[data-baseweb="input"]:focus-within,
+[data-baseweb="textarea"]:focus-within,
+[data-baseweb="select"] > div:focus-within {{
+    border-color:{BORDER_COLOR} !important;
+    box-shadow:0 0 0 1px rgba(200,16,46,.12) !important;
 }}
 
 [data-baseweb="select"] > div *,
@@ -170,6 +190,26 @@ button[data-testid="baseButton-primary"],
     opacity:1 !important;
 }}
 
+/* Light unchecked box and federation-red checked box. */
+[data-testid="stCheckbox"] input[type="checkbox"] {{
+    color-scheme: only light !important;
+    accent-color:{BORDER_COLOR} !important;
+}}
+[data-testid="stCheckbox"] input[type="checkbox"] + div {{
+    background-color:#FFFFFF !important;
+    background-image:none !important;
+    border:1px solid #9CA3AF !important;
+    box-shadow:none !important;
+}}
+[data-testid="stCheckbox"] input[type="checkbox"]:checked + div {{
+    background-color:{BORDER_COLOR} !important;
+    border-color:{BORDER_COLOR} !important;
+}}
+[data-testid="stCheckbox"] input[type="checkbox"]:checked + div svg {{
+    color:#FFFFFF !important;
+    fill:#FFFFFF !important;
+}}
+
 [data-testid="stFileUploader"] section,
 [data-testid="stFileUploaderDropzone"] {{
     color-scheme: only light !important;
@@ -182,6 +222,21 @@ button[data-testid="baseButton-primary"],
 [data-testid="stFileUploaderDropzone"] * {{
     color:#1F2937 !important;
     -webkit-text-fill-color:#1F2937 !important;
+}}
+
+/* Alert text must stay visible inside warning/info/success/error boxes. */
+[data-testid="stAlert"],
+[data-testid="stAlert"] *,
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] span {{
+    color-scheme: only light !important;
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+    opacity:1 !important;
+}}
+[data-testid="stAlert"] svg {{
+    color:#1F2937 !important;
+    fill:#1F2937 !important;
 }}
 
 [data-baseweb="popover"],
