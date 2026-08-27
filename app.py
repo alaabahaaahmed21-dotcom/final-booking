@@ -117,10 +117,108 @@ button[data-testid="baseButton-primary"],
     border-color:#D1D5DB !important;
     opacity:1 !important;
 }}
+
+/* Force every form label, hint and field to stay light and readable. */
+[data-testid="stAppViewContainer"] label,
+[data-testid="stAppViewContainer"] label *,
+[data-testid="stWidgetLabel"],
+[data-testid="stWidgetLabel"] *,
+[data-testid="stInputInstructions"],
+[data-testid="stInputInstructions"] * {{
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+    opacity:1 !important;
+}}
+
+[data-testid="stAppViewContainer"] input:not([type="checkbox"]):not([type="radio"]),
+[data-testid="stAppViewContainer"] textarea,
+[data-testid="stAppViewContainer"] [role="combobox"],
+[data-baseweb="input"],
+[data-baseweb="base-input"],
+[data-baseweb="textarea"],
+[data-baseweb="select"] > div {{
+    color-scheme: only light !important;
+    background-color:#FFFFFF !important;
+    background-image:none !important;
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+    border-color:#D1D5DB !important;
+    opacity:1 !important;
+}}
+
+[data-baseweb="select"] > div *,
+[data-baseweb="input"] svg,
+[data-baseweb="textarea"] svg {{
+    color:#1F2937 !important;
+    fill:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+}}
+
+[data-testid="stAppViewContainer"] input::placeholder,
+[data-testid="stAppViewContainer"] textarea::placeholder {{
+    color:#6B7280 !important;
+    -webkit-text-fill-color:#6B7280 !important;
+    opacity:1 !important;
+}}
+
+[data-baseweb="input"]:has(input:disabled),
+[data-baseweb="base-input"]:has(input:disabled),
+[data-testid="stAppViewContainer"] input:disabled {{
+    background-color:#F3F4F6 !important;
+    color:#4B5563 !important;
+    -webkit-text-fill-color:#4B5563 !important;
+    opacity:1 !important;
+}}
+
+[data-testid="stFileUploader"] section,
+[data-testid="stFileUploaderDropzone"] {{
+    color-scheme: only light !important;
+    background-color:#F8FAFC !important;
+    background-image:none !important;
+    color:#1F2937 !important;
+    border-color:#D1D5DB !important;
+}}
+[data-testid="stFileUploader"] section *,
+[data-testid="stFileUploaderDropzone"] * {{
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+}}
+
+[data-baseweb="popover"],
+[data-baseweb="menu"],
+[data-baseweb="calendar"],
+[role="listbox"],
+[role="option"] {{
+    color-scheme: only light !important;
+    background-color:#FFFFFF !important;
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+}}
+[role="option"]:hover,
+[role="option"][aria-selected="true"] {{
+    background-color:#F3F4F6 !important;
+}}
+
+input[type="date"]::-webkit-calendar-picker-indicator {{
+    color-scheme: only light !important;
+    opacity:1 !important;
+}}
+
 div[data-testid="stHorizontalBlock"] .stButton > button {{min-height:44px; font-size:14px;}}
 @media (prefers-color-scheme: dark) {{
     [data-testid="stAppViewContainer"] button:not([kind="primary"]):not([data-testid="baseButton-primary"]) {{
         background:#FFFFFF !important;
+        background-image:none !important;
+        color:#1F2937 !important;
+        -webkit-text-fill-color:#1F2937 !important;
+    }}
+    [data-baseweb="input"],
+    [data-baseweb="base-input"],
+    [data-baseweb="textarea"],
+    [data-baseweb="select"] > div,
+    [data-testid="stAppViewContainer"] input,
+    [data-testid="stAppViewContainer"] textarea {{
+        background-color:#FFFFFF !important;
         background-image:none !important;
         color:#1F2937 !important;
         -webkit-text-fill-color:#1F2937 !important;
