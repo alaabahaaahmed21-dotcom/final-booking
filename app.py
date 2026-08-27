@@ -50,8 +50,9 @@ st.set_page_config(
 st.markdown(
     f"""
 <style>
-:root {{color-scheme: light only;}}
+:root {{color-scheme: only light !important;}}
 html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
+    color-scheme: light !important;
     background-color:#FFFFFF !important; color:#1F2937 !important;
 }}
 .block-container {{padding-top: 1rem; max-width: 940px; padding-bottom: 2rem;}}
@@ -76,7 +77,39 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
     border-radius:10px; padding:14px 16px; margin-top:12px;
 }}
 .itkf-card {{border:1px solid #e5e7eb; border-radius:12px; padding:14px; margin:8px 0;}}
+/* Keep buttons readable even when the phone/browser forces Dark Mode. */
+.stButton > button[kind="secondary"],
+button[data-testid="baseButton-secondary"] {{
+    background:#FFFFFF !important;
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+    border:1.5px solid #D1D5DB !important;
+    box-shadow:none !important;
+}}
+.stButton > button[kind="primary"],
+button[data-testid="baseButton-primary"] {{
+    background:{BORDER_COLOR} !important;
+    color:#FFFFFF !important;
+    -webkit-text-fill-color:#FFFFFF !important;
+    border:1.5px solid {BORDER_COLOR} !important;
+}}
+.stButton > button p,
+.stButton > button span {{
+    color:inherit !important;
+    -webkit-text-fill-color:inherit !important;
+}}
+.stButton > button:hover {{
+    border-color:{BORDER_COLOR} !important;
+}}
 div[data-testid="stHorizontalBlock"] .stButton > button {{min-height:44px; font-size:14px;}}
+@media (prefers-color-scheme: dark) {{
+    .stButton > button[kind="secondary"],
+    button[data-testid="baseButton-secondary"] {{
+        background:#FFFFFF !important;
+        color:#1F2937 !important;
+        -webkit-text-fill-color:#1F2937 !important;
+    }}
+}}
 @media (max-width: 600px) {{
     .itkf-logo {{width:58px; height:58px;}}
     .itkf-logo:first-child {{width:72px; height:72px;}}
