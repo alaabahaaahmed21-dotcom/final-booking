@@ -41,7 +41,7 @@ from uploads import validate_uploaded_image
 
 st.set_page_config(
     page_title=f"{EVENT_TITLE} - {SYSTEM_TITLE}",
-    page_icon="🏨",
+    page_icon="🥋",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
