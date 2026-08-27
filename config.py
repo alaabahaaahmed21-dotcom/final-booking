@@ -35,13 +35,12 @@ BORDER_COLOR = "#C8102E"
 # Currency
 # ---------------------------------------------------------------------------
 
-# EUR is the only base currency.  Change these two values whenever the
-# organizer updates the exchange rate.  The starting values preserve the
-# relationship used by the original USD-based configuration:
-# 1 USD = 0.92 EUR and 1 USD = 49.00 EGP.
+# EUR is the only base currency.  The current working conversion agreed for
+# the application is 1 EUR = 56 EGP and 1 USD = 49.50 EGP.  Change these two
+# values only when the organizer publishes a new booking exchange rate.
 CURRENCY_RATES = {
-    "EUR_TO_USD": 1.0 / 0.92,
-    "EUR_TO_EGP": 49.0 / 0.92,
+    "EUR_TO_USD": 56.0 / 49.5,
+    "EUR_TO_EGP": 56.0,
 }
 
 
@@ -165,15 +164,69 @@ ROOM_OCCUPANCY = {
 # Transportation
 # ---------------------------------------------------------------------------
 
-# Vehicle names remain in English.  Enter each final EUR/person price here once
-# the official transportation plan arrives.  ``None`` means "price pending"
-# and prevents an invoice from being issued with an incorrect amount.
+# EUR is the transportation base currency too.  The Limousine values are for
+# one complete vehicle.  Every bus value is a preliminary EUR/person rate
+# derived from the supplier quotation and the stated vehicle capacity.
+TRANSPORT_RATE_VERSION = "2026-08-27 quotation - EUR preliminary rates"
+
+TRANSPORT_SERVICES = {
+    "One-way Transfer - Airport to Stadium or Hotel": (
+        "One-way Transfer - Airport to Stadium or Hotel"
+    ),
+    "Full Day Within Cairo": "Full Day Within Cairo",
+    "Evening Service": "Evening Service",
+}
+
+TRANSPORT_PRICING_LABELS = {
+    "per_vehicle": "Full Vehicle",
+    "per_person": "Per Person",
+}
+
 TRANSPORTATION = {
-    "Limousine": {"price_per_person_eur": None},
-    "Hiace Bus": {"price_per_person_eur": None},
-    "Coaster Bus": {"price_per_person_eur": None},
-    "33-Seat Bus": {"price_per_person_eur": None},
-    "50-Seat Bus": {"price_per_person_eur": None},
+    "Limousine": {
+        "pricing_modes": ("per_vehicle",),
+        "prices_eur": {
+            "One-way Transfer - Airport to Stadium or Hotel": 23.214286,
+            "Full Day Within Cairo": 80.357143,
+            "Evening Service": 32.142857,
+        },
+    },
+    "Hiace (15 Seats)": {
+        "capacity": 15,
+        "pricing_modes": ("per_person",),
+        "prices_eur": {
+            "One-way Transfer - Airport to Stadium or Hotel": 2.500000,
+            "Full Day Within Cairo": 6.666667,
+            "Evening Service": 2.976190,
+        },
+    },
+    "Coaster (30 Seats)": {
+        "capacity": 30,
+        "pricing_modes": ("per_person",),
+        "prices_eur": {
+            "One-way Transfer - Airport to Stadium or Hotel": 1.815476,
+            "Full Day Within Cairo": 3.690476,
+            "Evening Service": 1.785714,
+        },
+    },
+    "33-Seat Bus": {
+        "capacity": 33,
+        "pricing_modes": ("per_person",),
+        "prices_eur": {
+            "One-way Transfer - Airport to Stadium or Hotel": 1.948052,
+            "Full Day Within Cairo": 4.112554,
+            "Evening Service": 1.893939,
+        },
+    },
+    "50-Seat Bus": {
+        "capacity": 50,
+        "pricing_modes": ("per_person",),
+        "prices_eur": {
+            "One-way Transfer - Airport to Stadium or Hotel": 2.321429,
+            "Full Day Within Cairo": 4.714286,
+            "Evening Service": 1.892857,
+        },
+    },
 }
 
 
@@ -215,10 +268,18 @@ SHEET_COLUMNS = [
     "Nights",
     "Nightly Rate EUR",
     "Vehicle Type",
+    "Transportation Service",
+    "Transportation Pricing Mode",
     "Transportation Persons",
+    "Transportation Vehicle Count",
+    "Transportation Billed Units",
+    "Transportation Unit Price EGP",
+    "Transportation Unit Price EUR",
+    "Transportation Rate Version",
     "Transportation Price Per Person EUR",
     "Room Total EUR",
     "Transportation Total EUR",
+    "Transportation Total EGP",
     "Grand Total EUR",
     "Grand Total USD",
     "Grand Total EGP",
