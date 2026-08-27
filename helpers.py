@@ -15,6 +15,9 @@ from config import (
     REQUIRE_PASSPORT_PHOTO,
     REQUIRE_PERSONAL_PHOTO,
     ROOM_OCCUPANCY,
+    TRANSPORT_PRICING_LABELS,
+    TRANSPORT_RATE_VERSION,
+    TRANSPORT_SERVICES,
     TRANSPORTATION,
 )
 
@@ -49,17 +52,20 @@ def calculate_room_total(
     return _money(get_hotel_rate(hotel, meal_plan, room_type) * max(int(nights), 0))
 
 
-def transportation_price_per_person_eur(
+def transportation_unit_price_eur(
     vehicle_type: str | None,
-    transport_rates: dict[str, float | None] | None = None,
+    service: str | None,
+    pricing_mode: str | None,
 ) -> float | None:
-    if not vehicle_type:
+    """Return the configured EUR unit rate for one vehicle or one person."""
+
+    if not vehicle_type or not service or not pricing_mode:
         return None
-    if transport_rates is not None and vehicle_type in transport_rates:
-        value = transport_rates[vehicle_type]
-        return None if value is None else float(value)
     try:
-        value = TRANSPORTATION[vehicle_type]["price_per_person_eur"]
+        vehicle = TRANSPORTATION[vehicle_type]
+        if pricing_mode not in vehicle["pricing_modes"]:
+            return None
+        value = vehicle["prices_eur"][service]
         return None if value is None else float(value)
     except (KeyError, TypeError, ValueError):
         return None
@@ -68,17 +74,63 @@ def transportation_price_per_person_eur(
 def calculate_transportation_total(
     wants_transportation: bool,
     vehicle_type: str | None,
+    service: str | None,
+    pricing_mode: str | None,
     persons: int,
-    transport_rates: dict[str, float | None] | None = None,
-) -> tuple[float, float | None, bool]:
-    """Return (EUR total, EUR/person, price pending)."""
+    vehicle_count: int = 1,
+) -> dict[str, float | int | str | bool | None]:
+    """Calculate transport from the official EGP table.
+
+    The Limousine is billed by vehicle quantity.  Every bus is billed per
+    person using the preliminary seat rate configured in ``config.py``.
+    """
 
     if not wants_transportation:
-        return 0.0, 0.0, False
-    unit_price = transportation_price_per_person_eur(vehicle_type, transport_rates)
-    if unit_price is None:
-        return 0.0, None, True
-    return _money(unit_price * max(int(persons), 0)), _money(unit_price), False
+        return {
+            "transport_unit_price_egp": 0.0,
+            "transport_unit_price_eur": 0.0,
+            "transport_price_per_person_eur": 0.0,
+            "transport_billed_units": 0,
+            "transport_pricing_label": "Not requested",
+            "transport_price_pending": False,
+            "transport_total_eur": 0.0,
+            "transport_total_egp": 0.0,
+            "transport_rate_version": TRANSPORT_RATE_VERSION,
+        }
+
+    unit_price_eur = transportation_unit_price_eur(vehicle_type, service, pricing_mode)
+    billed_units = max(int(persons), 0) if pricing_mode == "per_person" else max(int(vehicle_count), 0)
+    pricing_label = TRANSPORT_PRICING_LABELS.get(str(pricing_mode), "Unknown")
+    if unit_price_eur is None:
+        return {
+            "transport_unit_price_egp": None,
+            "transport_unit_price_eur": None,
+            "transport_price_per_person_eur": None,
+            "transport_billed_units": billed_units,
+            "transport_pricing_label": pricing_label,
+            "transport_price_pending": True,
+            "transport_total_eur": 0.0,
+            "transport_total_egp": 0.0,
+            "transport_rate_version": TRANSPORT_RATE_VERSION,
+        }
+
+    eur_to_egp = float(CURRENCY_RATES["EUR_TO_EGP"])
+    total_eur = _money(unit_price_eur * billed_units)
+    unit_price_egp = _money(unit_price_eur * eur_to_egp)
+    total_egp = _money(total_eur * eur_to_egp)
+    return {
+        "transport_unit_price_egp": unit_price_egp,
+        "transport_unit_price_eur": round(float(unit_price_eur), 6),
+        "transport_price_per_person_eur": (
+            round(float(unit_price_eur), 6) if pricing_mode == "per_person" else 0.0
+        ),
+        "transport_billed_units": billed_units,
+        "transport_pricing_label": pricing_label,
+        "transport_price_pending": False,
+        "transport_total_eur": total_eur,
+        "transport_total_egp": total_egp,
+        "transport_rate_version": TRANSPORT_RATE_VERSION,
+    }
 
 
 def convert_currency(amount_eur: float, target_currency: str) -> float:
@@ -100,26 +152,31 @@ def calculate_booking_totals(
     wants_transportation: bool,
     vehicle_type: str | None,
     transport_persons: int = 0,
-    transport_rates: dict[str, float | None] | None = None,
-) -> dict[str, float | bool | None]:
+    transport_service: str | None = None,
+    transport_pricing_mode: str | None = None,
+    transport_vehicle_count: int = 1,
+) -> dict[str, float | int | str | bool | None]:
     room_total_eur = calculate_room_total(hotel, meal_plan, room_type, nights)
-    transport_total_eur, transport_price_per_person_eur, transport_price_pending = (
-        calculate_transportation_total(
-            wants_transportation, vehicle_type, transport_persons, transport_rates
-        )
+    transport = calculate_transportation_total(
+        wants_transportation,
+        vehicle_type,
+        transport_service,
+        transport_pricing_mode,
+        transport_persons,
+        transport_vehicle_count,
     )
+    transport_total_eur = float(transport["transport_total_eur"])
     grand_total_eur = _money(room_total_eur + transport_total_eur)
-    return {
+    room_total_egp = convert_currency(room_total_eur, "EGP")
+    result = {
         "nightly_rate_eur": _money(get_hotel_rate(hotel, meal_plan, room_type)),
         "room_total_eur": room_total_eur,
-        "transport_price_per_person_eur": transport_price_per_person_eur,
-        "transport_price_pending": transport_price_pending,
-        "transport_total_eur": transport_total_eur,
-        "transport_total_egp": convert_currency(transport_total_eur, "EGP"),
         "grand_total_eur": grand_total_eur,
         "grand_total_usd": convert_currency(grand_total_eur, "USD"),
-        "grand_total_egp": convert_currency(grand_total_eur, "EGP"),
+        "grand_total_egp": _money(room_total_egp + float(transport["transport_total_egp"])),
     }
+    result.update(transport)
+    return result
 
 
 def format_currency(amount: float, currency: str) -> str:
@@ -181,16 +238,31 @@ def validate_booking(booking: dict[str, Any]) -> list[str]:
         errors.append(f"The selected room accepts between 1 and {max_guests} guest(s).")
 
     if booking.get("wants_transportation"):
-        if booking.get("vehicle_type") not in TRANSPORTATION:
+        vehicle_type = booking.get("vehicle_type")
+        if vehicle_type not in TRANSPORTATION:
             errors.append("Please select a valid transportation option.")
+            vehicle = None
+        else:
+            vehicle = TRANSPORTATION[str(vehicle_type)]
+        if booking.get("transport_service") not in TRANSPORT_SERVICES:
+            errors.append("Please select a valid transportation service.")
+        pricing_mode = booking.get("transport_pricing_mode")
+        if vehicle and pricing_mode not in vehicle.get("pricing_modes", ()):
+            errors.append("Please select a valid transportation pricing method.")
         try:
             if int(booking.get("transport_persons", 0)) < 1:
                 raise ValueError
         except (TypeError, ValueError):
             errors.append("Please enter the number of persons using transportation.")
+        if pricing_mode == "per_vehicle":
+            try:
+                if int(booking.get("transport_vehicle_count", 0)) < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append("Please enter the number of vehicles required.")
         if booking.get("transport_price_pending"):
             errors.append(
-                "Transportation price is pending. Add the EUR price per person in config.py before confirmation."
+                "Transportation price is pending. Add the official rate in config.py before confirmation."
             )
 
     return errors
