@@ -279,6 +279,54 @@ div[data-testid="stHorizontalBlock"] .stButton > button {{min-height:44px; font-
         -webkit-text-fill-color:#1F2937 !important;
     }}
 }}
+
+/* Final mobile override: keep the latest fixes authoritative over browser auto-darkening. */
+div[data-testid="stTextInput"] div[data-baseweb="input"],
+div[data-testid="stNumberInput"] div[data-baseweb="input"],
+div[data-testid="stDateInput"] div[data-baseweb="input"],
+div[data-testid="stTextArea"] div[data-baseweb="textarea"],
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
+    color-scheme: only light !important;
+    background:#FFFFFF !important;
+    background-image:none !important;
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+    border-width:1px !important;
+    border-style:solid !important;
+    border-color:#D1D5DB !important;
+    box-shadow:none !important;
+}}
+div[data-testid="stTextInput"] div[data-baseweb="base-input"],
+div[data-testid="stNumberInput"] div[data-baseweb="base-input"],
+div[data-testid="stDateInput"] div[data-baseweb="base-input"],
+div[data-testid="stTextArea"] div[data-baseweb="base-input"] {{
+    border:0 !important;
+    box-shadow:none !important;
+}}
+div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child,
+div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child > div,
+div[data-testid="stCheckbox"] input[type="checkbox"] + div {{
+    color-scheme: only light !important;
+    background:#FFFFFF !important;
+    background-image:none !important;
+    border:1px solid #9CA3AF !important;
+    box-shadow:none !important;
+}}
+div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child:has(input:checked),
+div[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child:has(input:checked) > div,
+div[data-testid="stCheckbox"] input[type="checkbox"]:checked + div {{
+    background:{BORDER_COLOR} !important;
+    border-color:{BORDER_COLOR} !important;
+}}
+div[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] *,
+div[data-testid="stAlert"] p,
+div[data-testid="stAlert"] span {{
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+    opacity:1 !important;
+    visibility:visible !important;
+}}
 @media (max-width: 600px) {{
     .itkf-logo {{width:58px; height:58px;}}
     .itkf-logo:first-child {{width:72px; height:72px;}}
