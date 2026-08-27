@@ -23,6 +23,8 @@ from config import (
     REQUIRE_PERSONAL_PHOTO,
     ROOM_OCCUPANCY,
     SYSTEM_TITLE,
+    TRANSPORT_PRICING_LABELS,
+    TRANSPORT_SERVICES,
     TRANSPORTATION,
 )
 from countries import countries, countries_by_name, country_for_code, validate_phone
@@ -41,7 +43,7 @@ from uploads import validate_uploaded_image
 
 st.set_page_config(
     page_title=f"{EVENT_TITLE} - {SYSTEM_TITLE}",
-    page_icon="🥋",
+    page_icon="🏨",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
@@ -327,6 +329,74 @@ div[data-testid="stAlert"] span {{
     opacity:1 !important;
     visibility:visible !important;
 }}
+
+/* Streamlit widgets that use their own dark-mode surfaces. */
+div[data-testid="stExpander"] details,
+div[data-testid="stExpander"] summary {{
+    color-scheme: only light !important;
+    background:#FFFFFF !important;
+    background-image:none !important;
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+}}
+div[data-testid="stExpander"] summary *,
+div[data-testid="stExpander"] details p {{
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+}}
+div[data-testid="stExpander"] details a {{
+    color:#0284C7 !important;
+    -webkit-text-fill-color:#0284C7 !important;
+}}
+
+div[data-testid="stRadio"] input[type="radio"] {{
+    color-scheme: only light !important;
+    accent-color:{BORDER_COLOR} !important;
+}}
+div[data-testid="stRadio"] input[type="radio"] + div,
+div[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-of-type {{
+    background:#FFFFFF !important;
+    background-image:none !important;
+    border-color:#9CA3AF !important;
+    box-shadow:inset 0 0 0 20px #FFFFFF !important;
+}}
+div[data-testid="stRadio"] input[type="radio"]:checked + div,
+div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) > div:first-of-type {{
+    background:{BORDER_COLOR} !important;
+    border-color:{BORDER_COLOR} !important;
+    box-shadow:inset 0 0 0 20px {BORDER_COLOR} !important;
+}}
+div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) > div:first-of-type > div {{
+    background:#FFFFFF !important;
+}}
+
+div[data-testid="stDateInput"] div[data-baseweb="input"],
+div[data-testid="stDateInput"] div[data-baseweb="base-input"],
+div[data-testid="stDateInput"] input,
+div[data-testid*="DateInput"] div[data-baseweb="input"],
+div[data-testid*="DateInput"] input {{
+    color-scheme: only light !important;
+    forced-color-adjust:none !important;
+    background-color:#FFFFFF !important;
+    background-image:none !important;
+    color:#1F2937 !important;
+    -webkit-text-fill-color:#1F2937 !important;
+    box-shadow:inset 0 0 0 1000px #FFFFFF !important;
+    -webkit-box-shadow:inset 0 0 0 1000px #FFFFFF !important;
+}}
+
+div[data-testid="stWidgetLabel"] button,
+div[data-testid="stTooltipIcon"] button,
+button[data-testid="stTooltipIcon"] {{
+    color-scheme: only light !important;
+    background:transparent !important;
+    background-image:none !important;
+    color:#6B7280 !important;
+    -webkit-text-fill-color:#6B7280 !important;
+    border:0 !important;
+    box-shadow:none !important;
+    opacity:1 !important;
+}}
 @media (max-width: 600px) {{
     .itkf-logo {{width:58px; height:58px;}}
     .itkf-logo:first-child {{width:72px; height:72px;}}
@@ -392,6 +462,11 @@ def _first_hotel_defaults() -> tuple[str, str, str]:
 
 DEFAULT_HOTEL, DEFAULT_MEAL, DEFAULT_ROOM = _first_hotel_defaults()
 DEFAULT_COUNTRY = country_for_code(DEFAULT_COUNTRY_CODE)
+DEFAULT_VEHICLE = next(iter(TRANSPORTATION)) if TRANSPORTATION else None
+DEFAULT_TRANSPORT_SERVICE = next(iter(TRANSPORT_SERVICES)) if TRANSPORT_SERVICES else None
+DEFAULT_TRANSPORT_MODE = (
+    TRANSPORTATION[DEFAULT_VEHICLE]["pricing_modes"][0] if DEFAULT_VEHICLE else None
+)
 DEFAULTS = {
     "current_page": "Personal",
     "guest_name": "",
@@ -412,8 +487,11 @@ DEFAULTS = {
     "check_in": date.today(),
     "check_out": date.today() + timedelta(days=1),
     "wants_transportation": False,
-    "vehicle_type": next(iter(TRANSPORTATION)) if TRANSPORTATION else None,
+    "vehicle_type": DEFAULT_VEHICLE,
+    "transport_service": DEFAULT_TRANSPORT_SERVICE,
+    "transport_pricing_mode": DEFAULT_TRANSPORT_MODE,
     "transport_persons": 1,
+    "transport_vehicle_count": 1,
     "booking_submitted": False,
     "last_booking": None,
     "pending_submission": None,
@@ -486,6 +564,28 @@ def _sync_guests_to_room() -> None:
     )
 
 
+def _normalize_transport_state() -> None:
+    vehicle = st.session_state.get("vehicle_type")
+    if vehicle not in TRANSPORTATION:
+        st.session_state.vehicle_type = DEFAULT_VEHICLE
+        vehicle = DEFAULT_VEHICLE
+    if st.session_state.get("transport_service") not in TRANSPORT_SERVICES:
+        st.session_state.transport_service = DEFAULT_TRANSPORT_SERVICE
+    modes = TRANSPORTATION.get(vehicle, {}).get("pricing_modes", ())
+    if st.session_state.get("transport_pricing_mode") not in modes:
+        st.session_state.transport_pricing_mode = modes[0] if modes else None
+    try:
+        if int(st.session_state.get("transport_persons", 0)) < 1:
+            st.session_state.transport_persons = 1
+    except (TypeError, ValueError):
+        st.session_state.transport_persons = 1
+    try:
+        if int(st.session_state.get("transport_vehicle_count", 0)) < 1:
+            st.session_state.transport_vehicle_count = 1
+    except (TypeError, ValueError):
+        st.session_state.transport_vehicle_count = 1
+
+
 def _ensure_checkout() -> None:
     if st.session_state.check_out <= st.session_state.check_in:
         st.session_state.check_out = st.session_state.check_in + timedelta(days=1)
@@ -507,16 +607,9 @@ def current_nights() -> int:
         return 0
 
 
-def current_transport_rates() -> dict[str, float | None]:
-    return {
-        name: details.get("price_per_person_eur")
-        for name, details in TRANSPORTATION.items()
-    }
-
-
-def current_totals() -> dict[str, float | bool | None]:
+def current_totals() -> dict[str, float | int | str | bool | None]:
     _normalize_hotel_state()
-    transport_rates = current_transport_rates()
+    _normalize_transport_state()
     return calculate_booking_totals(
         st.session_state.hotel,
         st.session_state.meal_plan,
@@ -525,18 +618,27 @@ def current_totals() -> dict[str, float | bool | None]:
         bool(st.session_state.wants_transportation),
         st.session_state.vehicle_type,
         int(st.session_state.transport_persons),
-        transport_rates,
+        st.session_state.transport_service,
+        st.session_state.transport_pricing_mode,
+        int(st.session_state.transport_vehicle_count),
     )
 
 
-def render_price_box(totals: dict[str, float | bool | None]) -> None:
+def render_price_box(totals: dict[str, float | int | str | bool | None]) -> None:
     if totals.get("transport_price_pending"):
         transport_line = "<b>Transportation:</b> Price pending"
+    elif totals.get("transport_pricing_label") == "Not requested":
+        transport_line = "<b>Transportation:</b> Not requested"
     else:
-        unit_price = totals.get("transport_price_per_person_eur") or 0.0
+        unit_price_eur = totals.get("transport_unit_price_eur") or 0.0
+        unit_price_egp = totals.get("transport_unit_price_egp") or 0.0
+        pricing_label = html.escape(str(totals.get("transport_pricing_label") or ""))
+        billed_units = int(totals.get("transport_billed_units") or 0)
         transport_line = (
             f"<b>Transportation:</b> {format_currency(float(totals['transport_total_eur']), 'EUR')} "
-            f"({format_currency(float(unit_price), 'EUR')} per person)"
+            f"/ {format_currency(float(totals['transport_total_egp']), 'EGP')}<br>"
+            f"<small>{pricing_label}: {format_currency(float(unit_price_eur), 'EUR')} "
+            f"/ {format_currency(float(unit_price_egp), 'EGP')} × {billed_units}</small>"
         )
     st.markdown(
         f"""
@@ -598,7 +700,19 @@ def booking_from_state() -> dict[str, Any]:
         "nights": nights,
         "wants_transportation": bool(st.session_state.wants_transportation),
         "vehicle_type": st.session_state.vehicle_type if st.session_state.wants_transportation else None,
+        "transport_service": (
+            st.session_state.transport_service if st.session_state.wants_transportation else None
+        ),
+        "transport_pricing_mode": (
+            st.session_state.transport_pricing_mode if st.session_state.wants_transportation else None
+        ),
         "transport_persons": int(st.session_state.transport_persons) if st.session_state.wants_transportation else 0,
+        "transport_vehicle_count": (
+            int(st.session_state.transport_vehicle_count)
+            if st.session_state.wants_transportation
+            and st.session_state.transport_pricing_mode == "per_vehicle"
+            else 0
+        ),
         **totals,
     }
 
@@ -647,8 +761,14 @@ def attempt_pending_save() -> None:
     for total_key in (
         "nightly_rate_eur",
         "room_total_eur",
+        "transport_unit_price_egp",
+        "transport_unit_price_eur",
+        "transport_billed_units",
+        "transport_pricing_label",
+        "transport_rate_version",
         "transport_price_per_person_eur",
         "transport_total_eur",
+        "transport_total_egp",
         "grand_total_eur",
         "grand_total_usd",
         "grand_total_egp",
@@ -823,10 +943,19 @@ elif st.session_state.current_page == "Hotel":
 
 elif st.session_state.current_page == "Transportation":
     section_title(
-        "🚐", "Transportation", "Select the vehicle and enter the number of persons."
+        "🚐",
+        "Transportation",
+        "Select the service, vehicle and number of persons.",
     )
     st.checkbox("I need transportation", key="wants_transportation")
     if st.session_state.wants_transportation:
+        _normalize_transport_state()
+        st.selectbox(
+            "Service Type *",
+            list(TRANSPORT_SERVICES),
+            format_func=lambda value: TRANSPORT_SERVICES[value],
+            key="transport_service",
+        )
         vehicle_names = list(TRANSPORTATION)
         if st.session_state.vehicle_type not in vehicle_names:
             st.session_state.vehicle_type = vehicle_names[0]
@@ -834,23 +963,59 @@ elif st.session_state.current_page == "Transportation":
         with transport_col1:
             st.selectbox("Vehicle Type *", vehicle_names, key="vehicle_type")
         with transport_col2:
+            allowed_modes = TRANSPORTATION[st.session_state.vehicle_type]["pricing_modes"]
+            if st.session_state.transport_pricing_mode not in allowed_modes:
+                st.session_state.transport_pricing_mode = allowed_modes[0]
+            st.selectbox(
+                "Pricing Method *",
+                list(allowed_modes),
+                format_func=lambda value: TRANSPORT_PRICING_LABELS[value],
+                key="transport_pricing_mode",
+            )
+
+        count_col1, count_col2 = st.columns(2)
+        with count_col1:
             st.number_input(
                 "Number of Persons *", min_value=1, max_value=500, step=1, key="transport_persons"
             )
-        transport_rates = current_transport_rates()
-        unit_price = transport_rates.get(st.session_state.vehicle_type)
-        if unit_price is None:
+        with count_col2:
+            if st.session_state.transport_pricing_mode == "per_vehicle":
+                st.number_input(
+                    "Number of Vehicles *",
+                    min_value=1,
+                    max_value=50,
+                    step=1,
+                    key="transport_vehicle_count",
+                )
+            else:
+                capacity = TRANSPORTATION[st.session_state.vehicle_type].get("capacity")
+                st.text_input(
+                    "Charging Basis",
+                    value=(f"Per person - {capacity}-seat bus" if capacity else "Per person"),
+                    disabled=True,
+                )
+
+        totals = current_totals()
+        if totals.get("transport_price_pending"):
             st.warning(
-                "Price pending. Enter the EUR price per person in the "
-                "TRANSPORTATION section of config.py before accepting this booking."
+                "This transportation price is pending and cannot be confirmed yet."
             )
         else:
+            basis = str(totals.get("transport_pricing_label") or "")
             st.info(
-                f"Price per person: {format_currency(unit_price, 'EUR')} - "
-                f"Total for {int(st.session_state.transport_persons)} person(s): "
-                f"{format_currency(unit_price * int(st.session_state.transport_persons), 'EUR')}"
+                f"{basis} rate: "
+                f"{format_currency(float(totals['transport_unit_price_eur']), 'EUR')} "
+                f"({format_currency(float(totals['transport_unit_price_egp']), 'EGP')}). "
+                f"Transportation total: "
+                f"{format_currency(float(totals['transport_total_eur']), 'EUR')} / "
+                f"{format_currency(float(totals['transport_total_egp']), 'EGP')}"
             )
-        render_price_box(current_totals())
+            if st.session_state.transport_pricing_mode == "per_person":
+                st.caption(
+                    "Preliminary per-person rate calculated from the quoted full-bus price "
+                    "divided by the seat count."
+                )
+        render_price_box(totals)
     else:
         st.info("No transportation selected. You can return here at any time.")
 
@@ -896,14 +1061,24 @@ elif st.session_state.current_page == "Review":
 
     st.subheader("Transportation")
     if raw["wants_transportation"]:
+        st.write(f"Service: {raw['transport_service']}")
         st.write(f"Vehicle: {raw['vehicle_type']}")
+        st.write(f"Pricing method: {raw['transport_pricing_label']}")
         st.write(f"Persons: {raw['transport_persons']}")
+        if raw["transport_pricing_mode"] == "per_vehicle":
+            st.write(f"Vehicles: {raw['transport_vehicle_count']}")
         if raw.get("transport_price_pending"):
-            st.write("Price per person: Pending")
+            st.write("Transportation rate: Pending")
         else:
             st.write(
-                "Price per person: "
-                f"{format_currency(raw['transport_price_per_person_eur'], 'EUR')}"
+                "Unit rate: "
+                f"{format_currency(raw['transport_unit_price_eur'], 'EUR')} / "
+                f"{format_currency(raw['transport_unit_price_egp'], 'EGP')}"
+            )
+            st.write(
+                "Transportation total: "
+                f"{format_currency(raw['transport_total_eur'], 'EUR')} / "
+                f"{format_currency(raw['transport_total_egp'], 'EGP')}"
             )
     else:
         st.write("Not requested")
