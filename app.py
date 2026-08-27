@@ -425,10 +425,17 @@ def _normalize_hotel_state() -> None:
     rooms = plans[st.session_state.meal_plan]
     if st.session_state.get("room_type") not in rooms:
         st.session_state.room_type = next(iter(rooms))
-    max_guests = ROOM_OCCUPANCY.get(st.session_state.room_type, 1)
-    normalized_guests = min(max(int(st.session_state.get("guests", 1)), 1), max_guests)
-    if int(st.session_state.get("guests", 1)) != normalized_guests:
-        st.session_state.guests = normalized_guests
+    expected_guests = ROOM_OCCUPANCY.get(st.session_state.room_type, 1)
+    if int(st.session_state.get("guests", 0)) != expected_guests:
+        st.session_state.guests = expected_guests
+
+
+def _sync_guests_to_room() -> None:
+    """Set the exact guest count represented by the selected room type."""
+
+    st.session_state.guests = ROOM_OCCUPANCY.get(
+        st.session_state.get("room_type", DEFAULT_ROOM), 1
+    )
 
 
 def _ensure_checkout() -> None:
@@ -713,20 +720,35 @@ elif st.session_state.current_page == "Hotel":
     plans = list(hotel_info["rates"])
     if st.session_state.meal_plan not in plans:
         st.session_state.meal_plan = plans[0]
-    st.radio("Meal Plan *", plans, key="meal_plan", horizontal=True)
+    st.radio(
+        "Meal Plan *",
+        plans,
+        key="meal_plan",
+        horizontal=True,
+        on_change=_normalize_hotel_state,
+    )
 
     rooms = list(hotel_info["rates"][st.session_state.meal_plan])
     if st.session_state.room_type not in rooms:
         st.session_state.room_type = rooms[0]
     room_col, guests_col = st.columns(2)
     with room_col:
-        st.selectbox("Room Type *", rooms, key="room_type")
+        st.selectbox(
+            "Room Type *",
+            rooms,
+            key="room_type",
+            on_change=_sync_guests_to_room,
+        )
     with guests_col:
-        max_guests = ROOM_OCCUPANCY.get(st.session_state.room_type, 1)
-        if int(st.session_state.guests) > max_guests:
-            st.session_state.guests = max_guests
+        _sync_guests_to_room()
         st.number_input(
-            "Number of Guests *", min_value=1, max_value=max_guests, step=1, key="guests"
+            "Number of Guests (Automatic) *",
+            min_value=1,
+            max_value=max(ROOM_OCCUPANCY.values()),
+            step=1,
+            key="guests",
+            disabled=True,
+            help="Automatically set from the selected room type.",
         )
 
     date_col1, date_col2 = st.columns(2)
