@@ -77,35 +77,51 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
     border-radius:10px; padding:14px 16px; margin-top:12px;
 }}
 .itkf-card {{border:1px solid #e5e7eb; border-radius:12px; padding:14px; margin:8px 0;}}
-/* Keep buttons readable even when the phone/browser forces Dark Mode. */
-.stButton > button[kind="secondary"],
-button[data-testid="baseButton-secondary"] {{
+/* Keep every app button readable even when the phone/browser forces Dark Mode. */
+[data-testid="stAppViewContainer"] button {{
+    color-scheme: only light !important;
+}}
+[data-testid="stAppViewContainer"] button:not([kind="primary"]):not([data-testid="baseButton-primary"]) {{
     background:#FFFFFF !important;
+    background-image:none !important;
     color:#1F2937 !important;
     -webkit-text-fill-color:#1F2937 !important;
     border:1.5px solid #D1D5DB !important;
     box-shadow:none !important;
+    opacity:1 !important;
 }}
 .stButton > button[kind="primary"],
-button[data-testid="baseButton-primary"] {{
+button[data-testid="baseButton-primary"],
+.stFormSubmitButton > button[kind="primary"] {{
     background:{BORDER_COLOR} !important;
+    background-image:none !important;
     color:#FFFFFF !important;
     -webkit-text-fill-color:#FFFFFF !important;
     border:1.5px solid {BORDER_COLOR} !important;
+    opacity:1 !important;
 }}
-.stButton > button p,
-.stButton > button span {{
+[data-testid="stAppViewContainer"] button p,
+[data-testid="stAppViewContainer"] button span,
+[data-testid="stAppViewContainer"] button svg {{
     color:inherit !important;
     -webkit-text-fill-color:inherit !important;
 }}
-.stButton > button:hover {{
+[data-testid="stAppViewContainer"] button:not(:disabled):hover {{
     border-color:{BORDER_COLOR} !important;
+}}
+[data-testid="stAppViewContainer"] button:disabled {{
+    background:#F3F4F6 !important;
+    background-image:none !important;
+    color:#6B7280 !important;
+    -webkit-text-fill-color:#6B7280 !important;
+    border-color:#D1D5DB !important;
+    opacity:1 !important;
 }}
 div[data-testid="stHorizontalBlock"] .stButton > button {{min-height:44px; font-size:14px;}}
 @media (prefers-color-scheme: dark) {{
-    .stButton > button[kind="secondary"],
-    button[data-testid="baseButton-secondary"] {{
+    [data-testid="stAppViewContainer"] button:not([kind="primary"]):not([data-testid="baseButton-primary"]) {{
         background:#FFFFFF !important;
+        background-image:none !important;
         color:#1F2937 !important;
         -webkit-text-fill-color:#1F2937 !important;
     }}
