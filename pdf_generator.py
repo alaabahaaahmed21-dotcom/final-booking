@@ -17,9 +17,16 @@ from reportlab.lib.units import mm
 from reportlab.lib.pdfencrypt import StandardEncryption
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    Image as RLImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
-from config import EVENT_TITLE, SYSTEM_TITLE
+from config import EVENT_TITLE, LOGO_PATHS, SYSTEM_TITLE
 
 
 ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
@@ -70,6 +77,52 @@ def _money(value: Any, currency: str) -> str:
         return f"{currency} 0.00"
 
 
+def _logo_banner() -> Table | None:
+    """Build a centered three-logo row while preserving image proportions."""
+
+    logos: list[RLImage] = []
+    max_width = 38 * mm
+    max_height = 24 * mm
+    for configured_path in LOGO_PATHS.values():
+        path = Path(configured_path)
+        if not path.is_file():
+            continue
+        try:
+            logo = RLImage(str(path))
+            scale = min(max_width / logo.imageWidth, max_height / logo.imageHeight)
+            logo.drawWidth = logo.imageWidth * scale
+            logo.drawHeight = logo.imageHeight * scale
+            logo.hAlign = "CENTER"
+            logos.append(logo)
+        except (OSError, ValueError):
+            # A missing or unreadable logo must not prevent invoice creation.
+            continue
+
+    if not logos:
+        return None
+
+    total_width = 155 * mm
+    banner = Table(
+        [logos],
+        colWidths=[total_width / len(logos)] * len(logos),
+        rowHeights=[27 * mm],
+        hAlign="CENTER",
+    )
+    banner.setStyle(
+        TableStyle(
+            [
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 1),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+            ]
+        )
+    )
+    return banner
+
+
 def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
     buffer = io.BytesIO()
     encryption = None
@@ -88,8 +141,8 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
         pagesize=A4,
         rightMargin=18 * mm,
         leftMargin=18 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
         title=f"Invoice {_safe(booking.get('invoice_no') or booking.get('booking_id'))}",
         encrypt=encryption,
     )
@@ -115,18 +168,24 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
         "ITKFHeading", parent=styles["Heading2"], fontName=FONT_BOLD, fontSize=14
     )
     cell_style = ParagraphStyle(
-        "ITKFCell", parent=styles["Normal"], fontName=FONT_REGULAR, fontSize=8.5, leading=11
+        "ITKFCell", parent=styles["Normal"], fontName=FONT_REGULAR, fontSize=8.2, leading=10
     )
     label_style = ParagraphStyle(
         "ITKFLabel", parent=cell_style, fontName=FONT_BOLD, textColor=colors.HexColor("#374151")
     )
 
-    story = [
-        Paragraph(_safe(EVENT_TITLE), title_style),
-        Paragraph(_safe(SYSTEM_TITLE), subtitle_style),
-        Spacer(1, 8 * mm),
-        Paragraph("Booking Invoice", heading_style),
-    ]
+    story = []
+    logo_banner = _logo_banner()
+    if logo_banner is not None:
+        story.extend([logo_banner, Spacer(1, 3 * mm)])
+    story.extend(
+        [
+            Paragraph(_safe(EVENT_TITLE), title_style),
+            Paragraph(_safe(SYSTEM_TITLE), subtitle_style),
+            Spacer(1, 5 * mm),
+            Paragraph("Booking Invoice", heading_style),
+        ]
+    )
 
     rows = [
         ["Invoice No", _safe(booking.get("invoice_no") or booking.get("booking_id"))],
@@ -190,8 +249,8 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
             ]
         )
     )
