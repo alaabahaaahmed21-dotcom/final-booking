@@ -24,6 +24,19 @@ from config import (
 
 MONEY = Decimal("0.01")
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+PASSPORT_NUMBER_RE = re.compile(r"^[A-Z0-9]{5,20}$")
+
+
+def normalize_guest_name(value: Any) -> str:
+    """Match the passport style: trimmed, single-spaced and uppercase."""
+
+    return re.sub(r"\s+", " ", str(value or "").strip()).upper()
+
+
+def normalize_passport_number(value: Any) -> str:
+    """Return one canonical value for reliable duplicate detection."""
+
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
 
 def _money(value: float | int | Decimal) -> float:
@@ -189,10 +202,23 @@ def format_currency(amount: float, currency: str) -> str:
 def validate_booking(booking: dict[str, Any]) -> list[str]:
     errors: list[str] = []
 
-    if not str(booking.get("guest_name", "")).strip():
+    if not normalize_guest_name(booking.get("guest_name")):
         errors.append("Full name is required.")
     if not str(booking.get("nationality", "")).strip():
         errors.append("Nationality is required.")
+    passport_number = normalize_passport_number(booking.get("passport_number"))
+    if not PASSPORT_NUMBER_RE.fullmatch(passport_number):
+        errors.append("Passport number must contain 5 to 20 letters or numbers.")
+    try:
+        date_of_birth = booking.get("date_of_birth")
+        if isinstance(date_of_birth, str):
+            date_of_birth = date.fromisoformat(date_of_birth)
+        if not isinstance(date_of_birth, date):
+            raise ValueError
+        if date_of_birth < date(1900, 1, 1) or date_of_birth > date.today():
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("Please enter a valid date of birth.")
     if not booking.get("phone_valid") or not str(booking.get("phone", "")).startswith("+"):
         errors.append("Please enter a valid phone number for the selected country.")
     if not EMAIL_RE.match(str(booking.get("email", "")).strip()):

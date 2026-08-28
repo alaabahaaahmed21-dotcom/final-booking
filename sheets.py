@@ -164,11 +164,17 @@ def save_to_google_sheets(
                 ok = bool(result.get("ok")) and saved
                 if str(result.get("invoice_sha256", "")).lower() == pdf_sha256:
                     result["_invoice_pdf_bytes"] = pdf_bytes
+                message = str(result.get("message") or result.get("error") or "")
+                if result.get("error_code") == "DUPLICATE_PASSPORT":
+                    message = (
+                        "This passport number is already registered. "
+                        "Please check the number or contact the organizer."
+                    )
                 return SaveResult(
                     ok=ok,
                     saved=saved,
                     files_ok=bool(result.get("files_ok", saved)),
-                    message=str(result.get("message") or result.get("error") or ""),
+                    message=message,
                     data=result,
                 )
         except requests.RequestException as exc:

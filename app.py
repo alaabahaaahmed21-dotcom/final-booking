@@ -34,6 +34,8 @@ from helpers import (
     current_timestamp,
     format_currency,
     generate_booking_id,
+    normalize_guest_name,
+    normalize_passport_number,
     validate_booking,
 )
 from pdf_generator import generate_pdf
@@ -470,6 +472,8 @@ DEFAULT_TRANSPORT_MODE = (
 DEFAULTS = {
     "current_page": "Personal",
     "guest_name": "",
+    "date_of_birth": None,
+    "passport_number": "",
     "nationality": DEFAULT_COUNTRY.name,
     "nationality_code": DEFAULT_COUNTRY.iso2,
     "phone_country_code": DEFAULT_COUNTRY.calling_code,
@@ -509,6 +513,8 @@ for state_key, default_value in DEFAULTS.items():
 # Assigning an existing key to itself interrupts Streamlit's widget cleanup.
 PERSISTENT_FORM_KEYS = (
     "guest_name",
+    "date_of_birth",
+    "passport_number",
     "nationality",
     "phone_national",
     "email",
@@ -657,6 +663,18 @@ def _sync_country() -> None:
     st.session_state.phone_country_code = country.calling_code
 
 
+def _normalize_guest_name_state() -> None:
+    st.session_state.guest_name = normalize_guest_name(st.session_state.get("guest_name"))
+
+
+def _normalize_passport_state() -> None:
+    st.session_state.passport_number = normalize_passport_number(
+        st.session_state.get("passport_number")
+    )
+    if not st.session_state.get("pending_submission"):
+        st.session_state.pending_error = ""
+
+
 def current_nights() -> int:
     try:
         return calculate_nights(st.session_state.check_in, st.session_state.check_out)
@@ -739,7 +757,11 @@ def booking_from_state() -> dict[str, Any]:
     nights = current_nights()
     totals = current_totals()
     return {
-        "guest_name": str(st.session_state.get("guest_name", "")).strip(),
+        "guest_name": normalize_guest_name(st.session_state.get("guest_name")),
+        "date_of_birth": st.session_state.get("date_of_birth"),
+        "passport_number": normalize_passport_number(
+            st.session_state.get("passport_number")
+        ),
         "nationality": str(st.session_state.get("nationality", "")).strip(),
         "nationality_code": str(st.session_state.get("nationality_code", "")).strip(),
         "phone_country_code": str(st.session_state.get("phone_country_code", "")).strip(),
@@ -779,6 +801,7 @@ def submission_record(raw: dict[str, Any]) -> dict[str, Any]:
     record = {key: value for key, value in raw.items() if key not in excluded}
     record["check_in"] = raw["check_in"].isoformat()
     record["check_out"] = raw["check_out"].isoformat()
+    record["date_of_birth"] = raw["date_of_birth"].isoformat()
     record["booking_id"] = generate_booking_id()
     record["booking_date"] = current_timestamp()
     record["status"] = "Pending"
@@ -796,6 +819,10 @@ def attempt_pending_save() -> None:
 
     if not result.saved:
         st.session_state.pending_error = result.message
+        if result.data.get("error_code") == "DUPLICATE_PASSPORT":
+            st.session_state.pending_submission = None
+            st.session_state.current_page = "Personal"
+            st.rerun()
         return
 
     record = dict(pending["record"])
@@ -847,7 +874,32 @@ if st.session_state.current_page == "Personal":
     section_title(
         "📝", "Personal Details", "Enter the information exactly as it appears on the passport."
     )
-    st.text_input("Full Name *", key="guest_name")
+    if st.session_state.pending_error and not st.session_state.pending_submission:
+        st.error(st.session_state.pending_error)
+    st.text_input(
+        "Full Name (CAPITAL LETTERS) *",
+        key="guest_name",
+        on_change=_normalize_guest_name_state,
+        placeholder="EXACTLY AS WRITTEN ON THE PASSPORT",
+    )
+
+    passport_col, birth_col = st.columns(2)
+    with passport_col:
+        st.text_input(
+            "Passport Number *",
+            key="passport_number",
+            placeholder="Letters and numbers only",
+            on_change=_normalize_passport_state,
+            max_chars=20,
+        )
+    with birth_col:
+        st.date_input(
+            "Date of Birth *",
+            key="date_of_birth",
+            min_value=date(1900, 1, 1),
+            max_value=date.today(),
+            format="YYYY-MM-DD",
+        )
 
     country_names = [country.name for country in countries()]
     if st.session_state.nationality not in country_names:
@@ -1097,7 +1149,9 @@ elif st.session_state.current_page == "Review":
     with detail_col1:
         st.write(f"Name: {raw['guest_name'] or '-'}")
         st.write(f"Nationality: {raw['nationality'] or '-'}")
+        st.write(f"Date of birth: {raw['date_of_birth'].isoformat() if raw['date_of_birth'] else '-'}")
     with detail_col2:
+        st.write(f"Passport number: {raw['passport_number'] or '-'}")
         st.write(f"Phone: {raw['phone'] or '-'}")
         st.write(f"Email: {raw['email'] or '-'}")
 

@@ -193,6 +193,8 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
         ["Booking ID", _safe(booking.get("booking_id"))],
         ["Booking Date", _safe(booking.get("booking_date"))],
         ["Guest Name", _safe(booking.get("guest_name"))],
+        ["Date of Birth", _safe(booking.get("date_of_birth"))],
+        ["Passport Number", _safe(booking.get("passport_number"))],
         ["Nationality", _safe(booking.get("nationality"))],
         ["Phone", _safe(booking.get("phone"))],
         ["Email", _safe(booking.get("email"))],
