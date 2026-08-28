@@ -28,7 +28,7 @@ from config import (
     TRANSPORTATION,
 )
 from countries import countries, countries_by_name, country_for_code, validate_phone
-from booking_helpers import (
+from helpers import (
     calculate_booking_totals,
     calculate_nights,
     current_timestamp,
