@@ -6,9 +6,11 @@
 
 const BOOKINGS_SHEET = "Bookings";
 const INVOICES_SHEET = "Invoices";
+const MAX_IMAGE_BYTES = 1 * 1024 * 1024;
 
 const BOOKING_HEADERS = [
-  "Booking ID", "Booking Date", "Guest Name", "Nationality", "Nationality Code",
+  "Booking ID", "Booking Date", "Guest Name", "Date of Birth", "Passport Number",
+  "Nationality", "Nationality Code",
   "Phone Country Code", "Phone", "Email", "Personal Photo File ID", "Personal Photo URL",
   "Passport Photo File ID", "Passport Photo URL", "Hotel", "Meal Plan", "Room Type",
   "Guests", "Check-in", "Check-out", "Nights", "Nightly Rate EUR", "Vehicle Type",
@@ -99,7 +101,7 @@ function doPost(e) {
     const request = JSON.parse(e.postData.contents);
     authorize_(request.token);
     if (request.action === "check_duplicate") {
-      return json_(checkDuplicate_(request.booking_id));
+      return json_(checkDuplicate_(request.passport_number));
     }
     if (request.action === "create_booking") {
       return json_(createBooking_(
@@ -145,6 +147,16 @@ function createBooking_(booking, images, quoteSignature, invoicePayload) {
           error_code: "BUSY", error: "This booking is still being processed."
         };
       }
+    }
+
+    const duplicatePassportRow = findRow_(
+      context.sheet, context.headers, "Passport Number", booking.passport_number
+    );
+    if (duplicatePassportRow && duplicatePassportRow !== rowNumber) {
+      throw codedError_(
+        "DUPLICATE_PASSPORT",
+        "This passport number is already registered."
+      );
     }
 
     recalculateBooking_(booking, quoteSignature);
@@ -338,7 +350,8 @@ function recalculateBooking_(booking, quoteSignature) {
 function bookingColumns_(booking) {
   return {
     "Booking ID": booking.booking_id, "Booking Date": booking.booking_date,
-    "Guest Name": booking.guest_name, "Nationality": booking.nationality,
+    "Guest Name": booking.guest_name, "Date of Birth": booking.date_of_birth,
+    "Passport Number": booking.passport_number, "Nationality": booking.nationality,
     "Nationality Code": booking.nationality_code, "Phone Country Code": booking.phone_country_code,
     "Phone": booking.phone, "Email": booking.email, "Hotel": booking.hotel,
     "Meal Plan": booking.meal_plan, "Room Type": booking.room_type,
@@ -494,11 +507,12 @@ function upsertInvoiceLog_(booking, data) {
 }
 
 
-function checkDuplicate_(bookingId) {
+function checkDuplicate_(passportNumber) {
   const context = ensureSheet_(BOOKINGS_SHEET, BOOKING_HEADERS);
+  const normalized = normalizePassportNumber_(passportNumber);
   return {
     ok: true,
-    exists: Boolean(findRow_(context.sheet, context.headers, "Booking ID", bookingId))
+    exists: Boolean(findRow_(context.sheet, context.headers, "Passport Number", normalized))
   };
 }
 
@@ -542,8 +556,10 @@ function writeRow_(sheet, headers, rowNumber, data, existing) {
   if (!rowNumber) rowNumber = sheet.getLastRow() + 1;
   sheet.getRange(rowNumber, 1, 1, headers.length).setValues([values]);
   const bookingIdColumn = headers.indexOf("Booking ID") + 1;
+  const passportColumn = headers.indexOf("Passport Number") + 1;
   const phoneColumn = headers.indexOf("Phone") + 1;
   if (bookingIdColumn > 0) sheet.getRange(rowNumber, bookingIdColumn).setNumberFormat("@");
+  if (passportColumn > 0) sheet.getRange(rowNumber, passportColumn).setNumberFormat("@");
   if (phoneColumn > 0) sheet.getRange(rowNumber, phoneColumn).setNumberFormat("@");
   return rowNumber;
 }
@@ -566,8 +582,8 @@ function saveImage_(image, bookingId, kind) {
     throw new Error("Unsupported image type.");
   }
   const bytes = Utilities.base64Decode(image.base64);
-  if (!bytes.length || bytes.length > 8 * 1024 * 1024) {
-    throw new Error("Image is empty or exceeds 8 MB.");
+  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) {
+    throw new Error("Image is empty or exceeds the processed 1 MB limit.");
   }
   const safeId = String(bookingId).replace(/[^A-Za-z0-9_-]/g, "");
   const filename = safeId + "_" + kind + "_" + Utilities.getUuid() + "." + extension;
@@ -614,8 +630,11 @@ function resultFromObject_(data, saved, filesOk, message) {
 
 
 function validateBooking_(booking) {
+  booking.guest_name = normalizeGuestName_(booking.guest_name);
+  booking.passport_number = normalizePassportNumber_(booking.passport_number);
   const required = [
-    "booking_id", "booking_date", "guest_name", "nationality", "nationality_code",
+    "booking_id", "booking_date", "guest_name", "date_of_birth", "passport_number",
+    "nationality", "nationality_code",
     "phone_country_code", "phone", "email", "hotel", "meal_plan", "room_type",
     "check_in", "check_out"
   ];
@@ -631,6 +650,27 @@ function validateBooking_(booking) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(booking.email))) {
     throw codedError_("VALIDATION_ERROR", "Invalid email address.");
   }
+  if (!/^[A-Z0-9]{5,20}$/.test(String(booking.passport_number))) {
+    throw codedError_(
+      "VALIDATION_ERROR",
+      "Passport number must contain 5 to 20 letters or numbers."
+    );
+  }
+  const dateOfBirth = isoDate_(booking.date_of_birth);
+  const today = new Date();
+  if (dateOfBirth.getUTCFullYear() < 1900 || dateOfBirth.getTime() > today.getTime()) {
+    throw codedError_("VALIDATION_ERROR", "Invalid date of birth.");
+  }
+}
+
+
+function normalizePassportNumber_(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+
+function normalizeGuestName_(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
 }
 
 
@@ -793,4 +833,10 @@ function escapeHtml_(value) {
 function json_(object) {
   return ContentService.createTextOutput(JSON.stringify(object))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+
+function setupSheetsNow() {
+  ensureSheet_(BOOKINGS_SHEET, BOOKING_HEADERS);
+  ensureSheet_(INVOICES_SHEET, INVOICE_HEADERS);
 }
