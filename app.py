@@ -877,7 +877,7 @@ if st.session_state.current_page == "Personal":
     if st.session_state.pending_error and not st.session_state.pending_submission:
         st.error(st.session_state.pending_error)
     st.text_input(
-        "Full Name (CAPITAL LETTERS) *",
+        "Full Name*",
         key="guest_name",
         on_change=_normalize_guest_name_state,
         placeholder="EXACTLY AS WRITTEN ON THE PASSPORT",
