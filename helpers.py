@@ -301,4 +301,3 @@ def generate_booking_id() -> str:
 
 def current_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-# Force Streamlit deployment refresh
