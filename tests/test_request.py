@@ -7,8 +7,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from config import APP_SCHEMA_VERSION, HOTELS, TRANSPORTATION
-from helpers import calculate_booking_totals, validate_booking, price_transport_service, normalize_guest_name, normalize_passport_number, vehicle_suggestions, transport_schedule_dates
+from config import APP_SCHEMA_VERSION, HOTELS, TRANSPORTATION, SYSTEM_TITLE
+from helpers import calculate_booking_totals, validate_booking, price_transport_service, normalize_guest_name, normalize_passport_number, vehicle_suggestions, transport_schedule_dates, stay_dates, transport_end_time_options, time_minutes
 from countries import validate_phone
 from pdf_generator import generate_pdf
 
@@ -20,6 +20,8 @@ def example(kind="Federation"):
         "booking_id": "ITKF-20260830-ABCDEF123456", "booking_date": "2026-08-30T15:00:00+00:00",
         "guest_name": "TEST GUEST" if kind == "Individual" else "",
         "federation_name": "TEST FEDERATION" if kind == "Federation" else "",
+        "federation_country": "Egypt" if kind == "Federation" else "",
+        "federation_country_code": "EG" if kind == "Federation" else "",
         "passport_number": "TEST12345" if kind == "Individual" else "",
         "date_of_birth": "1996-03-21" if kind == "Individual" else "",
         "nationality": "Egypt" if kind == "Individual" else "",
@@ -35,6 +37,29 @@ def service():
             "vehicles": {"Bus (50 Seats)": 1, "Toyota Hiace (10 Seats)": 1}}
 
 class RequestTests(unittest.TestCase):
+    def test_end_time_choices_enforce_package_limits(self):
+        for hours, last, too_late in [(8,'04:00','05:00'),(12,'08:00','09:00')]:
+            options=transport_end_time_options('20:00',hours)
+            self.assertEqual(options[-1],last)
+            self.assertNotIn(too_late,options)
+            self.assertTrue(all(0 < (time_minutes(value)-time_minutes('20:00'))%1440 <= hours*60 for value in options))
+        self.assertIn('10:07',transport_end_time_options('09:00',8,'10:07'))
+        self.assertNotIn('18:01',transport_end_time_options('09:00',8,'18:01'))
+    def test_federation_country_required_only_for_federations(self):
+        b=example()
+        b.pop('federation_country'); b.pop('federation_country_code')
+        self.assertIn('Please select the federation country.',validate_booking(b))
+        self.assertEqual(validate_booking(example('Individual')),[])
+        b.update(federation_country='Germany',federation_country_code='DE')
+        self.assertEqual(validate_booking(b),[])
+
+    def test_checkout_message_and_maximum_stay_are_distinct(self):
+        for end in ('2026-10-23','2026-10-24'):
+            with self.assertRaisesRegex(ValueError,'^Check out date must be after check in date\\.$'):
+                stay_dates('2026-10-24',end)
+        with self.assertRaisesRegex(ValueError,'^Stay cannot exceed 60 nights\\.$'):
+            stay_dates('2026-10-01','2026-12-01')
+        self.assertEqual(stay_dates('2026-10-24','2026-10-25'),['2026-10-24'])
     def test_repeating_schedule_inclusive_range_and_exclusions(self):
         dates=transport_schedule_dates('Date range',start_date='2026-10-01',end_date='2026-10-12')
         self.assertEqual(len(dates),12)
@@ -108,6 +133,9 @@ class RequestTests(unittest.TestCase):
         self.assertIn("EUR 350.00", text)
         self.assertNotIn("USD", text); self.assertNotIn("EGP",text)
         self.assertIn("TEST FEDERATION",text)
+        self.assertIn("Federation Country",text)
+        self.assertIn("Egypt",text)
+        self.assertIn(SYSTEM_TITLE,text)
     def test_node_backend(self):
         b=example(); b["transport_services"]=[service()]; b.update(calculate_booking_totals(b))
         run=subprocess.run(["node",str(ROOT/"tests/test_backend.cjs")],input=json.dumps(b),text=True,capture_output=True)

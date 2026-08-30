@@ -44,7 +44,7 @@ def _check_version(url: str) -> dict | None:
         value = response.json()
         if not isinstance(value, dict) or value.get("version") != APP_SCHEMA_VERSION:
             return {"error_code": "SCHEMA_VERSION", "error":
-                    "The Google backend is an older version. In Apps Script: save the new code, run setupSheetsNow, then Manage deployments > Edit > New version > Deploy."}
+                    "The app and Google backend use different versions. Upload the matching config.py and application files. In Apps Script: save the matching code, run setupSheetsNow, then Manage deployments > Edit > New version > Deploy."}
     except (requests.RequestException, ValueError):
         return {"error_code": "CONNECTION", "error": "The booking service is unavailable. Check the Web App /exec URL and access settings, then retry."}
     return None

@@ -51,6 +51,13 @@ assert.equal(normalized.transport_services[0].seats,60);
 assert.equal(normalized.transport_services.length,fixture.transport_services.length,'all repeated service dates retained');
 let result=call('createBooking_',fixture,invoice(fixture));assert.equal(result.saved,true);assert.equal(result.customer_email_sent,true);
 assert.equal(all('Bookings').length,1);assert.equal(all('Invoices').length,1);assert.equal(emailCount,1);
+assert.equal(all('Bookings')[0]['Federation Country'],'Egypt');
+assert.equal(all('Bookings')[0]['Federation Country Code'],'EG');
+assert.equal(JSON.parse(all('Bookings')[0]['Booking JSON']).federation_country,'Egypt');
+const otherCountry=clone(fixture);otherCountry.federation_country='Germany';otherCountry.federation_country_code='DE';
+failure('ID_CONFLICT',()=>call('createBooking_',otherCountry,{}));
+const noCountry=changed(fixture,'10');delete noCountry.federation_country;delete noCountry.federation_country_code;
+failure('VALIDATION_ERROR',()=>call('createBooking_',noCountry,{}));
 result=call('createBooking_',fixture,invoice(fixture));assert.equal(all('Bookings').length,1);assert.equal(emailCount,1);assert.equal(files.size,1);
 const ac=call('accommodation_',fixture);
 assert.equal(call('availability_',ac,all('Bookings'))[0].remaining,9);
@@ -88,4 +95,27 @@ const badDate=changed(fixture,'9');badDate.check_in='2026-02-30';failure('VALIDA
 const override={Hotel:fixture.hotel,'Room Type':'Double',Date:'2026-10-25',Capacity:0};call('writeRow_',invctx,0,override);
 assert.equal(call('availability_',ac,all('Bookings'))[0].remaining,0,'per-date override');
 assert.equal(call('availability_',call('accommodation_',next),all('Bookings'))[0].remaining,10);
+for (const end of ['2026-10-24','2026-10-23']) {
+  assert.throws(()=>call('nights_','2026-10-24',end),e=>e.message==='Check out date must be after check in date.');
+}
+assert.throws(()=>call('nights_','2026-10-01','2026-12-01'),e=>e.message==='Stay cannot exceed 60 nights.');
+for (const [hours,end,late] of [[8,'04:00','05:00'],[12,'08:00','09:00']]) {
+  const travel=clone(fixture.transport_services[0]);Object.assign(travel,{service:'Daily '+hours+' Hours',direction:'',start_time:'20:00',end_time:end,ends_next_day:true});
+  assert.equal(call('transport_',[travel])[0].duration_minutes,hours*60);
+  travel.end_time=late;failure('VALIDATION_ERROR',()=>call('transport_',[travel]));
+}
+// A pre-v3 request lacking federation country can still be retried unchanged.
+const oldRaw=changed(fixture,'11');oldRaw.schema_version='2026-08-30-v2';delete oldRaw.federation_country;delete oldRaw.federation_country_code;
+const oldSnapshot=clone(normalized);Object.assign(oldSnapshot,{booking_id:oldRaw.booking_id,schema_version:oldRaw.schema_version,invoice_no:'INV-20260830-000000000011'});
+delete oldSnapshot.federation_country;delete oldSnapshot.federation_country_code;
+const oldHashData={};['registration_type','guest_name','federation_name','passport_number','date_of_birth','nationality','nationality_code','phone','email','hotel','meal_plan','check_in','check_out'].forEach(k=>oldHashData[k]=oldRaw[k]||'');
+oldHashData.rooms=oldRaw.rooms.map(r=>({room_type:r.room_type,quantity:r.quantity}));
+oldHashData.transport_services=oldRaw.transport_services.map(r=>({date:r.date,service:r.service,direction:r.direction||'',start_time:r.start_time,end_time:r.end_time,ends_next_day:r.ends_next_day===true,persons:r.persons,vehicles:r.vehicles}));
+const oldHash=crypto.createHash('sha256').update(JSON.stringify(call('sorted_',oldHashData))).digest('hex');
+assert.equal(call('requestHash_',oldRaw),oldHash,'pre-v3 hash compatibility');
+const oldRow=call('bookingColumns_',oldSnapshot);Object.assign(oldRow,{'Request Hash':oldHash,'Booking JSON':JSON.stringify(oldSnapshot),Status:'Received','Document Status':'Pending'});
+call('writeRow_',call('ensureSheet_','Bookings',[]),0,oldRow);
+const countBeforeRetry=all('Bookings').length;
+assert(call('createBooking_',oldRaw,{}).saved);
+assert.equal(all('Bookings').length,countBeforeRetry,'old retry does not create another reservation');
 console.log('PASS backend: schemas, parity, quotas, retries, duplicate passport, dates, capacities, documents, concurrency lock');

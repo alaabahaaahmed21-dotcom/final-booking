@@ -27,7 +27,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from config import BASE_DIR, EVENT_TITLE, LOGO_PATHS
+from config import BASE_DIR, EVENT_TITLE, LOGO_PATHS, SYSTEM_TITLE
 
 
 ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
@@ -165,6 +165,7 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
     if banner:
         story.extend([banner, Spacer(1,3*mm)])
     story.extend([Paragraph(_safe(EVENT_TITLE),title),
+                  Paragraph(_safe(SYSTEM_TITLE),centered),
                   Paragraph("Booking Request Summary",centered), Spacer(1,5*mm)])
     individual = booking.get("registration_type") == "Individual"
     details = [
@@ -180,6 +181,9 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
     if individual:
         details.extend([["Nationality",booking.get("nationality")],["Date of Birth",booking.get("date_of_birth")],
                         ["Passport Number",booking.get("passport_number")]])
+    elif booking.get("federation_country"):
+        # Older saved requests have no federation-country field; do not invent it.
+        details.append(["Federation Country",booking["federation_country"]])
     story.append(table(details,[48*mm,130*mm]))
     story.append(Paragraph("Accommodation",heading))
     story.append(paragraph(booking.get("hotel")))

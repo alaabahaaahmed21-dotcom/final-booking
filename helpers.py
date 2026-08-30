@@ -42,8 +42,10 @@ def calculate_nights(check_in: Any, check_out: Any) -> int:
 def stay_dates(check_in: Any, check_out: Any) -> list[str]:
     first = iso_date(check_in)
     nights = calculate_nights(check_in, check_out)
-    if not 1 <= nights <= MAX_BOOKING_NIGHTS:
-        raise ValueError(f"Stay must be between 1 and {MAX_BOOKING_NIGHTS} nights.")
+    if nights < 1:
+        raise ValueError("Check out date must be after check in date.")
+    if nights > MAX_BOOKING_NIGHTS:
+        raise ValueError(f"Stay cannot exceed {MAX_BOOKING_NIGHTS} nights.")
     return [(first + timedelta(days=i)).isoformat() for i in range(nights)]
 
 def transport_schedule_dates(mode: str, *, single_date=None, start_date=None,
@@ -75,6 +77,18 @@ def time_minutes(value: Any) -> int:
         raise ValueError("Choose a valid start and end time.")
     hour, minute = map(int, value.split(":"))
     return hour * 60 + minute
+
+def transport_end_time_options(start_time: str, maximum_hours: int, current_end: str | None = None) -> list[str]:
+    """Bound end choices to the package, including valid times after midnight."""
+    start = time_minutes(start_time)
+    maximum = positive_int(maximum_hours, "Service hours", maximum=23) * 60
+    offsets = set(range(15, maximum + 1, 15))
+    if current_end is not None:
+        duration = (time_minutes(current_end) - start) % 1440
+        if 0 < duration <= maximum:
+            offsets.add(duration)  # Retain an existing minute-precise booking time.
+    return [f"{((start + offset) // 60) % 24:02d}:{(start + offset) % 60:02d}"
+            for offset in sorted(offsets)]
 
 def service_duration(item: dict) -> int:
     minutes = time_minutes(item.get("end_time")) - time_minutes(item.get("start_time"))
@@ -165,6 +179,11 @@ def validate_booking(booking: dict[str, Any]) -> list[str]:
     field = "federation_name" if kind == "Federation" else "guest_name"
     if not str(booking.get(field, "")).strip() or len(str(booking.get(field, ""))) > 150:
         errors.append("Enter a name of up to 150 characters.")
+    if kind == "Federation":
+        country = str(booking.get("federation_country") or "").strip()
+        code = str(booking.get("federation_country_code") or "")
+        if not country or len(country) > 150 or not re.fullmatch(r"[A-Z]{2}", code):
+            errors.append("Please select the federation country.")
     if kind == "Individual":
         if not booking.get("nationality"):
             errors.append("Nationality is required.")

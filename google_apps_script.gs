@@ -1,10 +1,10 @@
 /**
- * ITKF request backend v2. Existing Bookings/Invoices rows are preserved.
+ * ITKF request backend v3. Existing Bookings/Invoices rows are preserved.
  * Properties: SPREADSHEET_ID, BOOKING_API_TOKEN, INVOICE_FOLDER_ID
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-08-30-v2";
+const VERSION = "2026-08-30-v3";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
@@ -13,7 +13,8 @@ const BOOKING_HEADERS = [
   "Transportation JSON","Transportation Rate Version","Room Total EUR","Transportation Total EUR",
   "Grand Total EUR","Invoice No","Invoice Verification Code","Invoice File ID","Invoice URL",
   "Invoice SHA-256","Customer Email Sent","Email Sent At","Status","Document Status",
-  "Processing Started","Last Error","Request Hash","Booking JSON","Schema Version"
+  "Processing Started","Last Error","Request Hash","Booking JSON","Schema Version",
+  "Federation Country","Federation Country Code"
 ];
 const INVOICE_HEADERS = [
   "Invoice No","Booking ID","Created At","Customer Name","Customer Email","Grand Total EUR",
@@ -108,7 +109,8 @@ function iso_(v) {
 }
 function nights_(start,end) {
   const count=(Date.parse(iso_(end))-Date.parse(iso_(start)))/86400000;
-  if (!Number.isInteger(count) || count<1 || count>60) throw codedError_("VALIDATION_ERROR","Stay must be 1 to 60 nights.");
+  if (!Number.isInteger(count) || count<1) throw codedError_("VALIDATION_ERROR","Check out date must be after check in date.");
+  if (count>60) throw codedError_("VALIDATION_ERROR","Stay cannot exceed 60 nights.");
   return count;
 }
 function dates_(start,end) {
@@ -179,7 +181,8 @@ function normalizeBooking_(raw) {
   const b=Object.assign(accommodation_(raw),{schema_version:VERSION,registration_type:type,
     booking_id:raw.booking_id,booking_date:String(raw.booking_date||""),
     guest_name:type==="Individual"?name:"",federation_name:type==="Federation"?name:"",
-    email:email,phone:phone,passport_number:"",date_of_birth:"",nationality:"",nationality_code:""});
+    email:email,phone:phone,passport_number:"",date_of_birth:"",nationality:"",nationality_code:"",
+    federation_country:"",federation_country_code:""});
   if (!isFinite(Date.parse(b.booking_date))) throw codedError_("VALIDATION_ERROR","Invalid request date.");
   if (type==="Individual") {
     b.passport_number=normalizePassportNumber_(raw.passport_number);
@@ -189,6 +192,11 @@ function normalizeBooking_(raw) {
     b.nationality=String(raw.nationality||"").trim(); b.nationality_code=String(raw.nationality_code||"");
     if (!b.nationality || !/^[A-Z]{2}$/.test(b.nationality_code)) throw codedError_("VALIDATION_ERROR","Nationality is required.");
     if (b.room_count!==1) throw codedError_("VALIDATION_ERROR","Use Federation registration for multiple rooms.");
+  } else {
+    b.federation_country=String(raw.federation_country||"").trim();
+    b.federation_country_code=String(raw.federation_country_code||"");
+    if (!b.federation_country || b.federation_country.length>150 || !/^[A-Z]{2}$/.test(b.federation_country_code))
+      throw codedError_("VALIDATION_ERROR","Please select the federation country.");
   }
   b.transport_services=transport_(raw.transport_services || []);
   b.transport_total_eur=money_(b.transport_services.reduce((sum,r)=>sum+r.total_eur,0));
@@ -207,6 +215,11 @@ function requestHash_(b) {
   const data={};
   ["registration_type","guest_name","federation_name","passport_number","date_of_birth",
    "nationality","nationality_code","phone","email","hotel","meal_plan","check_in","check_out"].forEach(k=>data[k]=b[k]||"");
+  // Only add new keys when supplied, retaining the hash of pre-v3 requests.
+  if (b.registration_type==="Federation" && (b.federation_country || b.federation_country_code)) {
+    data.federation_country=b.federation_country||"";
+    data.federation_country_code=b.federation_country_code||"";
+  }
   data.rooms=(b.rooms||[]).map(r=>({room_type:r.room_type,quantity:r.quantity}));
   data.transport_services=(b.transport_services||[]).map(r=>({
     date:r.date,service:r.service,direction:r.direction||"",start_time:r.start_time,end_time:r.end_time,
@@ -303,6 +316,7 @@ function createBooking_(raw,invoice) {
 function bookingColumns_(b) {
   return {"Booking ID":b.booking_id,"Booking Date":b.booking_date,"Registration Type":b.registration_type,
     "Guest Name":b.guest_name,"Federation Name":b.federation_name,"Date of Birth":b.date_of_birth,
+    "Federation Country":b.federation_country||"","Federation Country Code":b.federation_country_code||"",
     "Passport Number":b.passport_number,"Nationality":b.nationality,"Nationality Code":b.nationality_code,
     "Phone":b.phone,"Email":b.email,"Hotel":b.hotel,"Meal Plan":b.meal_plan,
     "Room Type":b.rooms.map(r=>r.room_type).join(" + "),"Number of Rooms":b.room_count,"Guests":b.guests,

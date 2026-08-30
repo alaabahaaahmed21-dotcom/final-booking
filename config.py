@@ -19,7 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 EVENT_ORG_NAME = "Egyptian Traditional Karate Federation"
 EVENT_TITLE = "23rd ITKF Championship"
-SYSTEM_TITLE = "Online Hotel Booking System"
+SYSTEM_TITLE = "Hotel Booking Request & Registration System"
 
 LOGO_PATHS = {
     "logo1": BASE_DIR / "assets" / "logo1.png",
@@ -160,7 +160,7 @@ ROOM_OCCUPANCY = {
 # Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
 # All prices include 14% VAT: never add it a second time.
 # ---------------------------------------------------------------------------
-APP_SCHEMA_VERSION = "2026-08-30-v2"
+APP_SCHEMA_VERSION = "2026-08-30-v3"
 TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
     "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,

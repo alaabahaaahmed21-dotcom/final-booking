@@ -28,6 +28,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+if APP_SCHEMA_VERSION != "2026-08-30-v3":
+    st.error("This app needs the matching v3 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+    st.stop()
+
 
 def _load_booking_helpers():
     """Load this app's helper file independently of a cached `helpers` module."""
@@ -44,7 +48,7 @@ def _load_booking_helpers():
         "calculate_booking_totals", "generate_booking_id", "current_timestamp",
         "normalize_guest_name", "normalize_passport_number", "validate_booking",
         "format_currency", "price_transport_service", "vehicle_suggestions",
-        "transport_schedule_dates",
+        "transport_schedule_dates", "transport_end_time_options",
     )
     missing = [name for name in required if not callable(getattr(module, name, None))]
     if missing:
@@ -65,6 +69,7 @@ format_currency = _booking_helpers.format_currency
 price_transport_service = _booking_helpers.price_transport_service
 vehicle_suggestions = _booking_helpers.vehicle_suggestions
 transport_schedule_dates = _booking_helpers.transport_schedule_dates
+transport_end_time_options = _booking_helpers.transport_end_time_options
 
 
 st.markdown(
@@ -484,6 +489,7 @@ DEFAULTS = {
     "nationality": DEFAULT_COUNTRY.name,
     "individual_phone": DEFAULT_COUNTRY.calling_code, "individual_email": "",
     "federation_name": "", "federation_phone": "+", "federation_email": "",
+    "federation_country": None,
     "hotel": DEFAULT_HOTEL, "meal_plan": DEFAULT_MEAL, "room_type": DEFAULT_ROOM,
     "check_in": date.today(), "check_out": date.today() + timedelta(days=1),
     "wants_transportation": False, "transport_ids": [],
@@ -620,6 +626,19 @@ def transport_dates_from_state(ident):
         start_date=key("range_start"), end_date=key("range_end"),
         selected_dates=key("selected_dates"), excluded_dates=key("excluded_dates"))
 
+def sync_transport_window(ident, full_package=False):
+    """Keep each package's end time valid; infer overnight travel automatically."""
+    prefix = f"tr_{ident}_"
+    start, end = st.session_state[prefix+"start"], st.session_state[prefix+"end"]
+    hours = TRANSPORT_SERVICES[st.session_state[prefix+"service"]]["max_hours"]
+    start_minutes = start.hour * 60 + start.minute
+    duration = (end.hour * 60 + end.minute - start_minutes) % 1440
+    if hours and (full_package or not 0 < duration <= hours * 60):
+        limit = (start_minutes + hours * 60) % 1440
+        end = dt_time(limit // 60, limit % 60)
+        st.session_state[prefix+"end"] = end
+    st.session_state[prefix+"next_day"] = end < start
+
 def transport_template_from_state(ident):
     key = lambda name: st.session_state[f"tr_{ident}_{name}"]
     return {"service": key("service"),
@@ -648,6 +667,7 @@ def booking_from_state():
     normalize_hotel_state()
     individual = state.registration_type == "Individual"
     country = countries_by_name()[state.nationality]
+    federation_country = countries_by_name().get(state.federation_country)
     phone_input = state.individual_phone if individual else state.federation_phone
     valid, phone, _ = validate_phone(country.iso2 if individual else "EG", phone_input)
     if not individual and not phone_input.strip().startswith("+"):
@@ -655,6 +675,8 @@ def booking_from_state():
     raw = {"schema_version": APP_SCHEMA_VERSION, "registration_type": state.registration_type,
            "guest_name": normalize_guest_name(state.guest_name) if individual else "",
            "federation_name": state.federation_name.strip() if not individual else "",
+           "federation_country": federation_country.name if not individual and federation_country else "",
+           "federation_country_code": federation_country.iso2 if not individual and federation_country else "",
            "passport_number": normalize_passport_number(state.passport_number) if individual else "",
            "date_of_birth": state.date_of_birth.isoformat() if individual and state.date_of_birth else "",
            "nationality": country.name if individual else "", "nationality_code": country.iso2 if individual else "",
@@ -686,6 +708,8 @@ def show_summary(raw):
         st.write(f"Passport number: {raw.get('passport_number') or '-'}")
         st.write(f"Date of birth: {raw.get('date_of_birth') or '-'}")
         st.write(f"Nationality: {raw.get('nationality') or '-'}")
+    else:
+        st.write(f"Federation country: {raw.get('federation_country') or '-'}")
     st.subheader("Hotel")
     st.write(f"{raw['hotel']} · {raw['meal_plan']}")
     st.write(f"Check-in: {raw['check_in']} · Check-out: {raw['check_out']}")
@@ -760,6 +784,8 @@ if page == "Personal":
         phone_value = st.session_state.individual_phone
     else:
         st.text_input("Federation Name *", key="federation_name", max_chars=150)
+        st.selectbox("Federation Country *", [c.name for c in countries()],
+                     key="federation_country", index=None, placeholder="Select the federation country")
         st.text_input("Federation Email *", key="federation_email")
         st.text_input("Federation Phone (including country code) *", key="federation_phone", placeholder="+201012345678")
         phone_value = st.session_state.federation_phone
@@ -822,7 +848,8 @@ elif page == "Transportation":
             prefix = f"tr_{ident}_"
             with st.expander(f"Service {order}", expanded=True):
                 st.selectbox("Service Type", list(TRANSPORT_SERVICES), key=prefix+"service",
-                             format_func=lambda v: TRANSPORT_SERVICES[v]["label"])
+                             format_func=lambda v: TRANSPORT_SERVICES[v]["label"],
+                             on_change=sync_transport_window, args=(ident, True))
                 service = st.session_state[prefix+"service"]
                 directions = TRANSPORT_SERVICES[service]["directions"]
                 if directions:
@@ -856,10 +883,21 @@ elif page == "Transportation":
                     st.multiselect("Selected service dates", st.session_state[prefix+"date_options"],
                                    key=prefix+"selected_dates", format_func=lambda v: v.strftime("%a, %d %b %Y"))
                     st.caption("Add each date once. Remove a date using its ×. The same vehicles and times apply to all selected dates.")
+                sync_transport_window(ident)
                 a, b = st.columns(2)
-                a.time_input("From", key=prefix+"start")
-                b.time_input("To", key=prefix+"end")
-                st.checkbox("End time is on the next day", key=prefix+"next_day")
+                a.time_input("From", key=prefix+"start", on_change=sync_transport_window, args=(ident,))
+                hours = TRANSPORT_SERVICES[service]["max_hours"]
+                start = st.session_state[prefix+"start"]
+                if hours:
+                    end_options = [dt_time.fromisoformat(value) for value in transport_end_time_options(
+                        start.strftime("%H:%M"), hours, st.session_state[prefix+"end"].strftime("%H:%M"))]
+                    b.selectbox(f"To (up to {hours} hours)", end_options, key=prefix+"end",
+                                format_func=lambda value: value.strftime("%H:%M") + (" (next day)" if value < start else ""))
+                    st.caption(f"End times are limited to {hours} hours after departure. The selected package price applies even if you choose fewer hours.")
+                else:
+                    b.time_input("To", key=prefix+"end", on_change=sync_transport_window, args=(ident,))
+                if st.session_state[prefix+"next_day"]:
+                    st.caption("Ends on the next day (after midnight). This is detected automatically.")
                 st.number_input("Passengers to transport", min_value=1, max_value=5000, key=prefix+"persons")
                 st.caption("Select the quantity of each vehicle you need:")
                 for i, (name, vehicle) in enumerate(TRANSPORTATION.items()):

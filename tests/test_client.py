@@ -10,7 +10,7 @@ from helpers import calculate_booking_totals
 
 class ClientTests(unittest.TestCase):
     def test_old_backend_blocked_before_post(self):
-        reply=MagicMock(); reply.json.return_value={'version':'old'}
+        reply=MagicMock(); reply.json.return_value={'version':'2026-08-30-v2'}
         with patch.object(sheets,'backend_is_configured',return_value=True), patch.object(sheets,'_url',return_value='https://example.test/exec'), patch.object(sheets.requests,'get',return_value=reply), patch.object(sheets.requests,'post') as post:
             self.assertEqual(sheets._post('create_booking',{})['error_code'],'SCHEMA_VERSION')
             post.assert_not_called()
