@@ -23,7 +23,22 @@ class WizardTests(unittest.TestCase):
         self.at.button(key='nav_'+name).click().run()
         self.clean()
 
+    def choose(self, kind='Federation'):
+        self.at.button(key='choose_'+kind).click().run()
+        self.clean()
+
+    def test_registration_is_its_own_screen_federation_first(self):
+        self.assertEqual(self.at.session_state['current_page'], 'Registration')
+        self.assertEqual([button.key for button in self.at.button], ['choose_Federation','choose_Individual'])
+        self.assertFalse(list(self.at.text_input))
+        self.assertFalse(list(self.at.number_input))
+        self.assertFalse(list(self.at.radio))
+        self.choose()
+        self.assertEqual(self.at.session_state['registration_type'],'Federation')
+        self.assertEqual(self.at.session_state['current_page'],'Personal')
+
     def test_empty_pages_and_next(self):
+        self.choose()
         for page in ('Hotel','Transportation','Review','Complete','Personal'):
             self.page(page)
         self.at.button(key='next_Personal').click().run()
@@ -31,6 +46,7 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(self.at.session_state['current_page'], 'Hotel')
 
     def test_individual_retains_fields_and_automatic_guests(self):
+        self.choose('Individual')
         self.at.text_input(key='guest_name').input('alaa bahaa').run()
         self.at.text_input(key='passport_number').input('ab123456').run()
         self.at.date_input(key='date_of_birth').set_value(date(1995,3,21)).run()
@@ -45,7 +61,7 @@ class WizardTests(unittest.TestCase):
         self.assertFalse(list(self.at.get('file_uploader')))
 
     def test_federation_rooms_and_transport_retained(self):
-        self.at.radio(key='registration_type').set_value('Federation').run()
+        self.choose()
         self.at.text_input(key='federation_name').input('TEST FEDERATION').run()
         self.at.text_input(key='federation_phone').input('+201012345678').run()
         self.at.text_input(key='federation_email').input('example@example.com').run()
@@ -74,6 +90,7 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(self.at.text_input(key='federation_name').value,'TEST FEDERATION')
 
     def test_unknown_save_retries_same_request(self):
+        self.choose()
         from test_request import example
         from helpers import calculate_booking_totals
         record=example(); record.update(calculate_booking_totals(record))
@@ -89,5 +106,91 @@ class WizardTests(unittest.TestCase):
             next(b for b in self.at.button if b.label=='Retry saving').click().run()
             self.clean()
             self.assertTrue(any('received successfully' in m.value for m in self.at.success))
+
+    def test_switch_registration_keeps_each_forms_data(self):
+        self.choose()
+        self.at.text_input(key='federation_name').input('FEDERATION STORED').run()
+        self.page('Registration')
+        self.choose('Individual')
+        self.at.text_input(key='guest_name').input('individual stored').run()
+        self.page('Registration')
+        self.choose()
+        self.assertEqual(self.at.text_input(key='federation_name').value,'FEDERATION STORED')
+        self.page('Registration')
+        self.choose('Individual')
+        self.assertEqual(self.at.text_input(key='guest_name').value,'INDIVIDUAL STORED')
+
+    def transport(self):
+        self.choose()
+        self.page('Transportation')
+        self.at.checkbox(key='wants_transportation').check().run()
+        ident=self.at.session_state['transport_ids'][0]
+        self.at.number_input(key=f'tr_{ident}_persons').set_value(60).run()
+        self.at.number_input(key=f'tr_{ident}_v4').set_value(1).run()
+        self.at.number_input(key=f'tr_{ident}_v2').set_value(1).run()
+        return ident
+
+    def test_twelve_dates_single_template_totals_payload_and_retry(self):
+        ident=self.transport(); prefix=f'tr_{ident}_'
+        self.at.selectbox(key=prefix+'date_mode').set_value('Date range').run()
+        self.at.date_input(key=prefix+'range_start').set_value(date(2026,10,1)).run()
+        self.at.date_input(key=prefix+'range_end').set_value(date(2026,10,12)).run()
+        self.clean()
+        self.assertTrue(any('12 date(s) × €250.00' in item.value and '€3,000.00' in item.value for item in self.at.info))
+        # Still only one time pair and one group of vehicle inputs, not 12 forms.
+        self.assertEqual(len(self.at.time_input),2)
+        self.assertEqual(len(self.at.number_input),6)
+        self.page('Review'); self.page('Transportation')
+        self.assertEqual(self.at.date_input(key=prefix+'range_end').value,date(2026,10,12))
+        self.at.multiselect(key=prefix+'excluded_dates').set_value([date(2026,10,5)]).run()
+        self.clean()
+        self.assertTrue(any('11 date(s) × €250.00' in item.value and '€2,750.00' in item.value for item in self.at.info))
+        self.at.button(key='action_duplicate_'+ident).click().run()
+        self.clean()
+        clone=self.at.session_state['transport_ids'][1]
+        self.at.selectbox(key=f'tr_{clone}_direction').select('Hotel to Airport').run()
+        self.assertEqual(self.at.selectbox(key=prefix+'direction').value,'Airport to Hotel')
+        self.assertEqual(self.at.multiselect(key=f'tr_{clone}_excluded_dates').value,[date(2026,10,5)])
+        self.page('Personal')
+        self.at.text_input(key='federation_name').input('TEST FEDERATION').run()
+        self.at.text_input(key='federation_email').input('example@example.com').run()
+        self.at.text_input(key='federation_phone').input('+201012345678').run()
+        with patch('sheets.backend_is_configured',return_value=True), patch('sheets.save_to_google_sheets',return_value=SaveResult(False,False,'Retry',{'error_code':'CONNECTION'})) as save:
+            self.page('Complete')
+            next(b for b in self.at.button if b.label=='Submit Booking Request').click().run()
+            self.clean()
+            record=save.call_args.args[0]
+            self.assertEqual(len(record['transport_services']),22)
+            self.assertEqual(record['transport_total_eur'],5500)
+            self.assertNotIn('2026-10-05',[item['date'] for item in record['transport_services']])
+            self.assertEqual(record['transport_services'][0]['date'],'2026-10-01')
+            self.assertEqual(record['transport_services'][10]['date'],'2026-10-12')
+            next(b for b in self.at.button if b.label=='Retry saving').click().run()
+            self.clean()
+            self.assertEqual(save.call_args.args[0],record)
+
+    def test_specific_dates_no_duplicates_can_remove_and_preserve(self):
+        ident=self.transport(); prefix=f'tr_{ident}_'
+        self.at.selectbox(key=prefix+'date_mode').set_value('Specific dates').run()
+        self.at.date_input(key=prefix+'pick_date').set_value(date(2026,10,3)).run()
+        self.at.button(key='action_add_date_'+ident).click().run()
+        self.at.button(key='action_add_date_'+ident).click().run()
+        self.assertEqual(len(self.at.multiselect(key=prefix+'selected_dates').value),1)
+        self.at.date_input(key=prefix+'pick_date').set_value(date(2026,10,8)).run()
+        self.at.button(key='action_add_date_'+ident).click().run()
+        self.clean()
+        self.page('Review'); self.page('Transportation')
+        self.assertEqual(self.at.multiselect(key=prefix+'selected_dates').value,[date(2026,10,3),date(2026,10,8)])
+        self.at.multiselect(key=prefix+'selected_dates').set_value([date(2026,10,8)]).run()
+        self.assertTrue(any('1 date(s) × €250.00' in item.value for item in self.at.info))
+
+    def test_invalid_schedule_never_crashes_other_steps_or_submits(self):
+        ident=self.transport(); prefix=f'tr_{ident}_'
+        self.at.selectbox(key=prefix+'date_mode').set_value('Specific dates').run()
+        for name in ('Personal','Hotel','Review','Complete'):
+            self.page(name)
+        submit=next(b for b in self.at.button if b.label=='Submit Booking Request')
+        self.assertTrue(submit.disabled)
+        self.assertTrue(any('Select at least one date' in item.value for item in self.at.error))
 
 if __name__=='__main__': unittest.main()

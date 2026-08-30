@@ -48,6 +48,7 @@ call('setupSheetsNow');assert(sheets.Bookings.cols>26,'schema expansion');
 const normalized=call('normalizeBooking_',fixture);
 assert.equal(normalized.grand_total_eur,fixture.grand_total_eur,'Python/JS total parity');
 assert.equal(normalized.transport_services[0].seats,60);
+assert.equal(normalized.transport_services.length,fixture.transport_services.length,'all repeated service dates retained');
 let result=call('createBooking_',fixture,invoice(fixture));assert.equal(result.saved,true);assert.equal(result.customer_email_sent,true);
 assert.equal(all('Bookings').length,1);assert.equal(all('Invoices').length,1);assert.equal(emailCount,1);
 result=call('createBooking_',fixture,invoice(fixture));assert.equal(all('Bookings').length,1);assert.equal(emailCount,1);assert.equal(files.size,1);

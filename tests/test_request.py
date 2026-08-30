@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from config import APP_SCHEMA_VERSION, HOTELS, TRANSPORTATION
-from helpers import calculate_booking_totals, validate_booking, price_transport_service, normalize_guest_name, normalize_passport_number, vehicle_suggestions
+from helpers import calculate_booking_totals, validate_booking, price_transport_service, normalize_guest_name, normalize_passport_number, vehicle_suggestions, transport_schedule_dates
 from countries import validate_phone
 from pdf_generator import generate_pdf
 
@@ -35,6 +35,24 @@ def service():
             "vehicles": {"Bus (50 Seats)": 1, "Toyota Hiace (10 Seats)": 1}}
 
 class RequestTests(unittest.TestCase):
+    def test_repeating_schedule_inclusive_range_and_exclusions(self):
+        dates=transport_schedule_dates('Date range',start_date='2026-10-01',end_date='2026-10-12')
+        self.assertEqual(len(dates),12)
+        self.assertEqual((dates[0],dates[-1]),('2026-10-01','2026-10-12'))
+        trimmed=transport_schedule_dates('Date range',start_date='2026-10-01',end_date='2026-10-12',excluded_dates=['2026-10-05'])
+        self.assertEqual(len(trimmed),11); self.assertNotIn('2026-10-05',trimmed)
+        b=example(); b['transport_services']=[dict(service(),date=day) for day in dates]
+        self.assertEqual(calculate_booking_totals(b)['transport_total_eur'],3000)
+
+    def test_repeating_dates_unique_sorted_and_validated(self):
+        self.assertEqual(transport_schedule_dates('Specific dates',selected_dates=['2026-10-08','2026-10-03','2026-10-08']),['2026-10-03','2026-10-08'])
+        for args in [dict(mode='Specific dates',selected_dates=[]),dict(mode='Date range',start_date='2026-10-12',end_date='2026-10-01'),dict(mode='Date range',start_date='2026-10-01',end_date='2026-12-31'),dict(mode='Date range',start_date='2026-10-01',end_date='2026-10-01',excluded_dates=['2026-10-01'])]:
+            with self.assertRaises(ValueError): transport_schedule_dates(**args)
+
+    def test_schedule_error_blocks_booking(self):
+        b=example(); b['transport_schedule_error']='Choose service dates'
+        self.assertIn('Choose service dates',validate_booking(b))
+
     def test_names(self):
         self.assertEqual(normalize_guest_name("  Alaa  Bahaa "), "ALAA BAHAA")
         self.assertEqual(normalize_passport_number("ab- 001234"), "AB001234")
@@ -95,5 +113,14 @@ class RequestTests(unittest.TestCase):
         run=subprocess.run(["node",str(ROOT/"tests/test_backend.cjs")],input=json.dumps(b),text=True,capture_output=True)
         self.assertEqual(run.returncode,0,run.stdout+run.stderr)
         self.assertIn("PASS",run.stdout)
+
+    def test_repeated_schedule_accepted_by_unchanged_backend(self):
+        b=example()
+        dates=transport_schedule_dates('Date range',start_date='2026-10-01',end_date='2026-10-12')
+        b['transport_services']=[dict(service(),date=day) for day in dates]
+        b.update(calculate_booking_totals(b))
+        run=subprocess.run(['node',str(ROOT/'tests/test_backend.cjs')],input=json.dumps(b),text=True,capture_output=True)
+        self.assertEqual(run.returncode,0,run.stdout+run.stderr)
+        self.assertIn('PASS',run.stdout)
 
 if __name__ == "__main__": unittest.main()
