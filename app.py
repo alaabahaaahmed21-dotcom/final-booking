@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import copy
 import html
+import importlib.util
 import mimetypes
 from datetime import date, timedelta, time as dt_time
+from pathlib import Path
 import uuid
 from typing import Any
 
@@ -16,9 +18,6 @@ from config import (BORDER_COLOR, DEFAULT_COUNTRY_CODE, EVENT_TITLE, HEADER_BG_C
     HOTELS, LOGO_PATHS, ROOM_OCCUPANCY, SYSTEM_TITLE, TRANSPORT_SERVICES, TRANSPORTATION,
     APP_SCHEMA_VERSION, MAX_TRANSPORT_SERVICES)
 from countries import countries, countries_by_name, country_for_code, validate_phone
-from helpers import (calculate_booking_totals, generate_booking_id, current_timestamp,
-    normalize_guest_name, normalize_passport_number, validate_booking, format_currency,
-    price_transport_service, vehicle_suggestions, transport_schedule_dates)
 from sheets import backend_is_configured, save_to_google_sheets, check_availability
 
 
@@ -28,6 +27,44 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
+
+
+def _load_booking_helpers():
+    """Load this app's helper file independently of a cached `helpers` module."""
+    helper_path = Path(__file__).resolve().with_name("helpers.py")
+    spec = importlib.util.spec_from_file_location("_itkf_booking_helpers", helper_path)
+    if spec is None or spec.loader is None:
+        st.error("Cannot load helpers.py. Upload it beside app.py, then reboot the app.")
+        st.stop()
+    module = importlib.util.module_from_spec(spec)
+    # Do not mutate/reload sys.modules['helpers']: another session or dependency
+    # may be using that object. Each run gets the adjacent project's source.
+    spec.loader.exec_module(module)
+    required = (
+        "calculate_booking_totals", "generate_booking_id", "current_timestamp",
+        "normalize_guest_name", "normalize_passport_number", "validate_booking",
+        "format_currency", "price_transport_service", "vehicle_suggestions",
+        "transport_schedule_dates",
+    )
+    missing = [name for name in required if not callable(getattr(module, name, None))]
+    if missing:
+        st.error("The application files are different versions. Replace helpers.py beside app.py with the latest supplied file, then reboot the app.")
+        st.code("Missing functions: " + ", ".join(missing), language=None)
+        st.stop()
+    return module
+
+
+_booking_helpers = _load_booking_helpers()
+calculate_booking_totals = _booking_helpers.calculate_booking_totals
+generate_booking_id = _booking_helpers.generate_booking_id
+current_timestamp = _booking_helpers.current_timestamp
+normalize_guest_name = _booking_helpers.normalize_guest_name
+normalize_passport_number = _booking_helpers.normalize_passport_number
+validate_booking = _booking_helpers.validate_booking
+format_currency = _booking_helpers.format_currency
+price_transport_service = _booking_helpers.price_transport_service
+vehicle_suggestions = _booking_helpers.vehicle_suggestions
+transport_schedule_dates = _booking_helpers.transport_schedule_dates
 
 
 st.markdown(
