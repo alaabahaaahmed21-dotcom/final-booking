@@ -177,7 +177,10 @@ function normalizeBooking_(raw) {
   if (!name || name.length>150) throw codedError_("VALIDATION_ERROR","Enter a name of up to 150 characters.");
   const email=String(raw.email||"").trim(), phone=String(raw.phone||"").trim();
   if (email.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw codedError_("VALIDATION_ERROR","Invalid email address.");
-  if (!/^\+[1-9]\d{6,14}$/.test(phone)) throw codedError_("VALIDATION_ERROR","Invalid international phone number.");
+  // Federation phone is optional; an entered number must still be valid.
+  // Individual registration continues to require a phone number.
+  if ((type==="Individual" || phone!=="") && !/^\+[1-9]\d{6,14}$/.test(phone))
+    throw codedError_("VALIDATION_ERROR","Invalid international phone number.");
   const b=Object.assign(accommodation_(raw),{schema_version:VERSION,registration_type:type,
     booking_id:raw.booking_id,booking_date:String(raw.booking_date||""),
     guest_name:type==="Individual"?name:"",federation_name:type==="Federation"?name:"",

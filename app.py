@@ -491,7 +491,7 @@ DEFAULTS = {
     "guest_name": "", "date_of_birth": None, "passport_number": "",
     "nationality": DEFAULT_COUNTRY.name,
     "individual_phone": DEFAULT_COUNTRY.calling_code, "individual_email": "",
-    "federation_name": "", "federation_phone": "+", "federation_email": "",
+    "federation_name": "", "federation_phone": "", "federation_email": "",
     "federation_country": None,
     "hotel": DEFAULT_HOTEL, "meal_plan": DEFAULT_MEAL, "room_type": DEFAULT_ROOM,
     "check_in": date.today(), "check_out": date.today() + timedelta(days=1),
@@ -510,6 +510,11 @@ if st.session_state.get("draft_state_version") != "independent-inputs-v1":
             st.session_state[key] = copy.deepcopy(st.session_state[key])
     st.session_state.draft_state_version = "independent-inputs-v1"
 st.session_state.setdefault("validation_attempts", [])
+if not st.session_state.get("optional_federation_phone_initialized"):
+    # The old '+' placeholder is not an entered phone number.
+    if st.session_state.federation_phone == "+":
+        st.session_state.federation_phone = ""
+    st.session_state.optional_federation_phone_initialized = True
 
 
 def save_visible_inputs():
@@ -557,6 +562,13 @@ st.session_state.rendered_input_keys = []
 
 PAGES = ["Personal", "Hotel", "Transportation", "Review", "Complete"]
 def go_to(page):
+    """Step tabs and Back are unrestricted previews; keep the draft intact."""
+    save_visible_inputs()
+    st.session_state.current_page = page
+
+
+def advance_to(page):
+    """Next validates required fields; preview tabs never use this callback."""
     save_visible_inputs()
     current = st.session_state.current_page
     forward = page in PAGES and (current not in PAGES or PAGES.index(page) > PAGES.index(current))
@@ -594,7 +606,7 @@ def render_step_navigation(back=None, next_page=None):
                     use_container_width=True, on_click=go_to, args=(back,))
     if next_page:
         right.button("Next →", key="next_" + st.session_state.current_page,
-                     type="primary", use_container_width=True, on_click=go_to, args=(next_page,))
+                     type="primary", use_container_width=True, on_click=advance_to, args=(next_page,))
 
 def normalize_hotel_state():
     state = st.session_state
@@ -733,7 +745,7 @@ def booking_from_state():
     individual = state.registration_type == "Individual"
     country = countries_by_name()[state.nationality]
     federation_country = countries_by_name().get(state.federation_country)
-    phone_input = state.individual_phone if individual else state.federation_phone
+    phone_input = str((state.individual_phone if individual else state.federation_phone) or "").strip()
     valid, phone, _ = validate_phone(country.iso2 if individual else "EG", phone_input)
     if not individual and not phone_input.strip().startswith("+"):
         valid = False
@@ -745,7 +757,9 @@ def booking_from_state():
            "passport_number": normalize_passport_number(state.passport_number) if individual else "",
            "date_of_birth": state.date_of_birth.isoformat() if individual and state.date_of_birth else "",
            "nationality": country.name if individual else "", "nationality_code": country.iso2 if individual else "",
-           "phone": phone if valid else "", "phone_valid": valid,
+           # Keep an invalid provided value visible to validation. Otherwise
+           # an invalid federation number would look like an omitted number.
+           "phone": phone if valid else phone_input, "phone_valid": valid,
            "email": (state.individual_email if individual else state.federation_email).strip(),
            "hotel": state.hotel, "meal_plan": state.meal_plan, "rooms": selected_rooms(),
            "check_in": state.check_in.isoformat() if state.check_in else "",
@@ -892,7 +906,7 @@ if page == "Personal":
         input_field("selectbox", "Federation Country *", [c.name for c in countries()],
                      key="federation_country", index=None, placeholder="Select the federation country")
         input_field("text_input", "Federation Email *", key="federation_email")
-        input_field("text_input", "Federation Phone (including country code) *", key="federation_phone", placeholder="+201012345678")
+        input_field("text_input", "Federation Phone (optional — including country code)", key="federation_phone", placeholder="+201012345678")
     raw = booking_from_state()
     if raw["phone_valid"]:
         st.caption(f"Phone: {raw['phone']}")

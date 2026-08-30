@@ -53,6 +53,18 @@ class RequestTests(unittest.TestCase):
         b.update(federation_country='Germany',federation_country_code='DE')
         self.assertEqual(validate_booking(b),[])
 
+    def test_federation_phone_optional_but_individual_phone_required(self):
+        for value in ('', None, '   '):
+            b=example(); b.update(phone=value,phone_valid=False)
+            self.assertEqual(validate_booking(b),[])
+            b=example('Individual'); b.update(phone=value,phone_valid=False)
+            self.assertTrue(any('international phone' in error for error in validate_booking(b)))
+        for value in ('+', 'abc', '+20'):
+            b=example(); b.update(phone=value,phone_valid=False)
+            self.assertTrue(any('international phone' in error for error in validate_booking(b)))
+        b=example(); b.pop('phone'); b.pop('phone_valid')
+        self.assertEqual(validate_booking(b),[])
+
     def test_checkout_message_and_maximum_stay_are_distinct(self):
         for end in ('2026-10-23','2026-10-24'):
             with self.assertRaisesRegex(ValueError,'^The check-out date must be after the check-in date\\.$'):

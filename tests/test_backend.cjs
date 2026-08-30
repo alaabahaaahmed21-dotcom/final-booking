@@ -123,4 +123,25 @@ call('writeRow_',call('ensureSheet_','Bookings',[]),0,oldRow);
 const countBeforeRetry=all('Bookings').length;
 assert(call('createBooking_',oldRaw,{}).saved);
 assert.equal(all('Bookings').length,countBeforeRetry,'old retry does not create another reservation');
+// Optional federation phone must work through normalization, storage, documents,
+// email and idempotent retries, not just the browser's validation.
+const noPhone=changed(fixture,'12');Object.assign(noPhone,{phone:'',phone_valid:false,check_in:'2026-11-01',check_out:'2026-11-03'});
+const beforeNoPhone=all('Bookings').length;
+const noPhoneResult=call('createBooking_',noPhone,invoice(noPhone));
+assert(noPhoneResult.saved);assert(noPhoneResult.invoice_created);assert(noPhoneResult.customer_email_sent);
+const noPhoneRow=all('Bookings').find(r=>r['Booking ID']===noPhone.booking_id);
+assert.equal(noPhoneRow.Phone,'');assert.equal(JSON.parse(noPhoneRow['Booking JSON']).phone,'');
+const mailsAfterNoPhone=emailCount;
+assert(call('createBooking_',noPhone,invoice(noPhone)).saved);
+assert.equal(all('Bookings').length,beforeNoPhone+1);assert.equal(emailCount,mailsAfterNoPhone);
+for (const phone of [undefined,null,'   ']) {
+  const omitted=clone(noPhone);omitted.phone=phone;
+  assert.equal(call('normalizeBooking_',omitted).phone,'');
+}
+for (const phone of ['abc','+','+20']) {
+  const invalid=clone(noPhone);invalid.phone=phone;
+  failure('VALIDATION_ERROR',()=>call('normalizeBooking_',invalid));
+}
+const individualNoPhone=clone(person);individualNoPhone.phone='';
+failure('VALIDATION_ERROR',()=>call('normalizeBooking_',individualNoPhone));
 console.log('PASS backend: schemas, parity, quotas, retries, duplicate passport, dates, capacities, documents, concurrency lock');
