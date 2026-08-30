@@ -1,303 +1,175 @@
-"""Pure calculation, formatting and validation helpers."""
-
+"""Pure EUR request validation and pricing. No images and no currency conversion."""
 from __future__ import annotations
-
 import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
+from config import HOTELS, ROOM_OCCUPANCY, MAX_BOOKING_NIGHTS, MAX_TRANSPORT_SERVICES, TRANSPORTATION, TRANSPORT_SERVICES, TRANSPORT_RATE_VERSION
 
-from config import (
-    CURRENCY_RATES,
-    HOTELS,
-    MAX_BOOKING_NIGHTS,
-    REQUIRE_PASSPORT_PHOTO,
-    REQUIRE_PERSONAL_PHOTO,
-    ROOM_OCCUPANCY,
-    TRANSPORT_PRICING_LABELS,
-    TRANSPORT_RATE_VERSION,
-    TRANSPORT_SERVICES,
-    TRANSPORTATION,
-)
-
-
-MONEY = Decimal("0.01")
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PASSPORT_NUMBER_RE = re.compile(r"^[A-Z0-9]{5,20}$")
 
-
 def normalize_guest_name(value: Any) -> str:
-    """Match the passport style: trimmed, single-spaced and uppercase."""
-
     return re.sub(r"\s+", " ", str(value or "").strip()).upper()
 
-
 def normalize_passport_number(value: Any) -> str:
-    """Return one canonical value for reliable duplicate detection."""
-
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
+def money(value: Any) -> float:
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
-def _money(value: float | int | Decimal) -> float:
-    return float(Decimal(str(value)).quantize(MONEY, rounding=ROUND_HALF_UP))
-
-
-def calculate_nights(check_in: date, check_out: date) -> int:
-    """Return the number of hotel nights, or zero for an invalid range."""
-
-    return max((check_out - check_in).days, 0)
-
-
-def get_hotel_rate(hotel: str, meal_plan: str, room_type: str) -> float:
-    try:
-        return float(HOTELS[hotel]["rates"][meal_plan][room_type])
-    except (KeyError, TypeError, ValueError):
-        return 0.0
-
-
-def calculate_room_total(
-    hotel: str,
-    meal_plan: str,
-    room_type: str,
-    nights: int,
-) -> float:
-    return _money(get_hotel_rate(hotel, meal_plan, room_type) * max(int(nights), 0))
-
-
-def transportation_unit_price_eur(
-    vehicle_type: str | None,
-    service: str | None,
-    pricing_mode: str | None,
-) -> float | None:
-    """Return the configured EUR unit rate for one vehicle or one person."""
-
-    if not vehicle_type or not service or not pricing_mode:
-        return None
-    try:
-        vehicle = TRANSPORTATION[vehicle_type]
-        if pricing_mode not in vehicle["pricing_modes"]:
-            return None
-        value = vehicle["prices_eur"][service]
-        return None if value is None else float(value)
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def calculate_transportation_total(
-    wants_transportation: bool,
-    vehicle_type: str | None,
-    service: str | None,
-    pricing_mode: str | None,
-    persons: int,
-    vehicle_count: int = 1,
-) -> dict[str, float | int | str | bool | None]:
-    """Calculate transport from the official EGP table.
-
-    The Limousine is billed by vehicle quantity.  Every bus is billed per
-    person using the preliminary seat rate configured in ``config.py``.
-    """
-
-    if not wants_transportation:
-        return {
-            "transport_unit_price_egp": 0.0,
-            "transport_unit_price_eur": 0.0,
-            "transport_price_per_person_eur": 0.0,
-            "transport_billed_units": 0,
-            "transport_pricing_label": "Not requested",
-            "transport_price_pending": False,
-            "transport_total_eur": 0.0,
-            "transport_total_egp": 0.0,
-            "transport_rate_version": TRANSPORT_RATE_VERSION,
-        }
-
-    unit_price_eur = transportation_unit_price_eur(vehicle_type, service, pricing_mode)
-    billed_units = max(int(persons), 0) if pricing_mode == "per_person" else max(int(vehicle_count), 0)
-    pricing_label = TRANSPORT_PRICING_LABELS.get(str(pricing_mode), "Unknown")
-    if unit_price_eur is None:
-        return {
-            "transport_unit_price_egp": None,
-            "transport_unit_price_eur": None,
-            "transport_price_per_person_eur": None,
-            "transport_billed_units": billed_units,
-            "transport_pricing_label": pricing_label,
-            "transport_price_pending": True,
-            "transport_total_eur": 0.0,
-            "transport_total_egp": 0.0,
-            "transport_rate_version": TRANSPORT_RATE_VERSION,
-        }
-
-    eur_to_egp = float(CURRENCY_RATES["EUR_TO_EGP"])
-    total_eur = _money(unit_price_eur * billed_units)
-    unit_price_egp = _money(unit_price_eur * eur_to_egp)
-    total_egp = _money(total_eur * eur_to_egp)
-    return {
-        "transport_unit_price_egp": unit_price_egp,
-        "transport_unit_price_eur": round(float(unit_price_eur), 6),
-        "transport_price_per_person_eur": (
-            round(float(unit_price_eur), 6) if pricing_mode == "per_person" else 0.0
-        ),
-        "transport_billed_units": billed_units,
-        "transport_pricing_label": pricing_label,
-        "transport_price_pending": False,
-        "transport_total_eur": total_eur,
-        "transport_total_egp": total_egp,
-        "transport_rate_version": TRANSPORT_RATE_VERSION,
-    }
-
-
-def convert_currency(amount_eur: float, target_currency: str) -> float:
-    currency = target_currency.upper()
-    if currency == "EUR":
-        return _money(amount_eur)
-    if currency == "USD":
-        return _money(amount_eur * float(CURRENCY_RATES["EUR_TO_USD"]))
-    if currency == "EGP":
-        return _money(amount_eur * float(CURRENCY_RATES["EUR_TO_EGP"]))
-    raise ValueError(f"Unsupported currency: {target_currency}")
-
-
-def calculate_booking_totals(
-    hotel: str,
-    meal_plan: str,
-    room_type: str,
-    nights: int,
-    wants_transportation: bool,
-    vehicle_type: str | None,
-    transport_persons: int = 0,
-    transport_service: str | None = None,
-    transport_pricing_mode: str | None = None,
-    transport_vehicle_count: int = 1,
-) -> dict[str, float | int | str | bool | None]:
-    room_total_eur = calculate_room_total(hotel, meal_plan, room_type, nights)
-    transport = calculate_transportation_total(
-        wants_transportation,
-        vehicle_type,
-        transport_service,
-        transport_pricing_mode,
-        transport_persons,
-        transport_vehicle_count,
-    )
-    transport_total_eur = float(transport["transport_total_eur"])
-    grand_total_eur = _money(room_total_eur + transport_total_eur)
-    room_total_egp = convert_currency(room_total_eur, "EGP")
-    result = {
-        "nightly_rate_eur": _money(get_hotel_rate(hotel, meal_plan, room_type)),
-        "room_total_eur": room_total_eur,
-        "grand_total_eur": grand_total_eur,
-        "grand_total_usd": convert_currency(grand_total_eur, "USD"),
-        "grand_total_egp": _money(room_total_egp + float(transport["transport_total_egp"])),
-    }
-    result.update(transport)
+def positive_int(value: Any, label: str, maximum: int = 5000, allow_zero: bool = False) -> int:
+    if isinstance(value, bool) or not re.fullmatch(r"\d+", str(value)):
+        raise ValueError(f"{label} must be a whole number.")
+    result = int(value)
+    if result < (0 if allow_zero else 1) or result > maximum:
+        raise ValueError(f"Invalid {label.lower()}.")
     return result
 
+def iso_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        raise ValueError("Use a date without a time.")
+    if isinstance(value, date):
+        return value
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value)):
+        raise ValueError("Use a valid date.")
+    return date.fromisoformat(value)
 
-def format_currency(amount: float, currency: str) -> str:
-    symbols = {"EUR": "€", "USD": "$", "EGP": "EGP "}
-    code = currency.upper()
-    symbol = symbols.get(code, f"{code} ")
-    return f"{symbol}{float(amount):,.2f}"
+def calculate_nights(check_in: Any, check_out: Any) -> int:
+    return max((iso_date(check_out) - iso_date(check_in)).days, 0)
 
+def stay_dates(check_in: Any, check_out: Any) -> list[str]:
+    first = iso_date(check_in)
+    nights = calculate_nights(check_in, check_out)
+    if not 1 <= nights <= MAX_BOOKING_NIGHTS:
+        raise ValueError(f"Stay must be between 1 and {MAX_BOOKING_NIGHTS} nights.")
+    return [(first + timedelta(days=i)).isoformat() for i in range(nights)]
+
+def time_minutes(value: Any) -> int:
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value)):
+        raise ValueError("Choose a valid start and end time.")
+    hour, minute = map(int, value.split(":"))
+    return hour * 60 + minute
+
+def service_duration(item: dict) -> int:
+    minutes = time_minutes(item.get("end_time")) - time_minutes(item.get("start_time"))
+    if item.get("ends_next_day") is True:
+        minutes += 1440
+    if not 0 < minutes <= 1440:
+        raise ValueError("End time must follow start time; select next day if needed.")
+    return minutes
+
+def vehicle_suggestions(remaining: int) -> list[str]:
+    """Suggest single vehicles that fit the remaining passengers; never add one."""
+    return [name for name, v in sorted(TRANSPORTATION.items(), key=lambda pair: pair[1]["capacity"])
+            if v["capacity"] >= remaining]
+
+def price_transport_service(item: dict) -> dict:
+    service = str(item.get("service", ""))
+    if service not in TRANSPORT_SERVICES:
+        raise ValueError("Choose a valid transportation service.")
+    iso_date(item.get("date"))
+    duration = service_duration(item)
+    limit = TRANSPORT_SERVICES[service]["max_hours"]
+    if limit and duration > limit * 60:
+        raise ValueError(f"{service} allows up to {limit} hours. Choose the appropriate service.")
+    directions = TRANSPORT_SERVICES[service]["directions"]
+    if directions and item.get("direction") not in directions:
+        raise ValueError("Choose the transfer direction.")
+    persons = positive_int(item.get("persons"), "Number of passengers")
+    selected = item.get("vehicles")
+    if not isinstance(selected, dict) or any(name not in TRANSPORTATION for name in selected):
+        raise ValueError("Choose valid vehicles.")
+    lines = []
+    seats = total = 0
+    for name, raw in selected.items():
+        qty = positive_int(raw, "Vehicle quantity", maximum=100, allow_zero=True)
+        if not qty:
+            continue
+        v = TRANSPORTATION[name]
+        unit = v["prices_eur"][service]
+        lines.append({"vehicle": name, "quantity": qty, "unit_price_eur": unit, "total_eur": money(qty * unit)})
+        seats += qty * v["capacity"]
+        total += qty * unit
+    return {**item, "duration_minutes": duration, "persons": persons, "seats": seats,
+            "remaining": max(persons - seats, 0), "vehicle_lines": lines, "total_eur": money(total)}
+
+def calculate_booking_totals(booking: dict) -> dict:
+    hotel = HOTELS.get(booking.get("hotel"), {})
+    rates = hotel.get("rates", {}).get(booking.get("meal_plan"), {})
+    if not rates:
+        raise ValueError("Choose a valid hotel and meal plan.")
+    nights = len(stay_dates(booking.get("check_in"), booking.get("check_out")))
+    rooms = booking.get("rooms")
+    if not isinstance(rooms, list) or not rooms or len(rooms) > len(rates):
+        raise ValueError("Select at least one room.")
+    room_lines, seen = [], set()
+    guests = count = subtotal = 0
+    for item in rooms:
+        room = item.get("room_type")
+        if room not in rates or room in seen:
+            raise ValueError("Choose valid, distinct room types.")
+        seen.add(room)
+        qty = positive_int(item.get("quantity"), "Number of rooms")
+        unit = rates[room]
+        # Preserve the existing hotel's rate basis; add quantity as a multiplier.
+        line_total = money(unit * qty * nights)
+        room_lines.append({"room_type": room, "quantity": qty, "unit_rate_eur": unit, "total_eur": line_total})
+        guests += ROOM_OCCUPANCY[room] * qty
+        count += qty
+        subtotal += line_total
+    if booking.get("registration_type") == "Individual" and count != 1:
+        raise ValueError("Individual registration allows one room. Use Federation for multiple rooms.")
+    services = booking.get("transport_services", [])
+    if not isinstance(services, list) or len(services) > MAX_TRANSPORT_SERVICES:
+        raise ValueError("Too many transportation services.")
+    priced_services = [price_transport_service(item) for item in services]
+    total_transport = money(sum(item["total_eur"] for item in priced_services))
+    return {"nights": nights, "rooms": room_lines, "room_count": count, "guests": guests,
+            "room_total_eur": money(subtotal), "transport_services": priced_services,
+            "transport_total_eur": total_transport, "grand_total_eur": money(subtotal + total_transport),
+            "transport_rate_version": TRANSPORT_RATE_VERSION}
 
 def validate_booking(booking: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-
-    if not normalize_guest_name(booking.get("guest_name")):
-        errors.append("Full name is required.")
-    if not str(booking.get("nationality", "")).strip():
-        errors.append("Nationality is required.")
-    passport_number = normalize_passport_number(booking.get("passport_number"))
-    if not PASSPORT_NUMBER_RE.fullmatch(passport_number):
-        errors.append("Passport number must contain 5 to 20 letters or numbers.")
-    try:
-        date_of_birth = booking.get("date_of_birth")
-        if isinstance(date_of_birth, str):
-            date_of_birth = date.fromisoformat(date_of_birth)
-        if not isinstance(date_of_birth, date):
-            raise ValueError
-        if date_of_birth < date(1900, 1, 1) or date_of_birth > date.today():
-            raise ValueError
-    except (TypeError, ValueError):
-        errors.append("Please enter a valid date of birth.")
-    if not booking.get("phone_valid") or not str(booking.get("phone", "")).startswith("+"):
-        errors.append("Please enter a valid phone number for the selected country.")
-    if not EMAIL_RE.match(str(booking.get("email", "")).strip()):
-        errors.append("Please enter a valid email address.")
-
-    if REQUIRE_PERSONAL_PHOTO and not booking.get("personal_photo"):
-        errors.append("Personal photo is required.")
-    if REQUIRE_PASSPORT_PHOTO and not booking.get("passport_photo"):
-        errors.append("Passport photo is required.")
-
-    hotel = booking.get("hotel")
-    meal_plan = booking.get("meal_plan")
-    room_type = booking.get("room_type")
-    if hotel not in HOTELS:
-        errors.append("Please select a valid hotel.")
-    elif meal_plan not in HOTELS[hotel]["rates"]:
-        errors.append("Please select a valid meal plan for this hotel.")
-    elif room_type not in HOTELS[hotel]["rates"][meal_plan]:
-        errors.append("Please select a valid room type for this hotel and meal plan.")
-
-    try:
-        check_in = booking.get("check_in")
-        check_out = booking.get("check_out")
-        if isinstance(check_in, str):
-            check_in = date.fromisoformat(check_in)
-        if isinstance(check_out, str):
-            check_out = date.fromisoformat(check_out)
-        nights = calculate_nights(check_in, check_out)
-        if nights < 1:
-            errors.append("Check-out date must be after check-in date.")
-        elif nights > MAX_BOOKING_NIGHTS:
-            errors.append(f"A booking cannot exceed {MAX_BOOKING_NIGHTS} nights.")
-    except (TypeError, ValueError):
-        errors.append("Please select valid check-in and check-out dates.")
-        nights = 0
-
-    try:
-        guests = int(booking.get("guests", 0))
-    except (TypeError, ValueError):
-        guests = 0
-    max_guests = ROOM_OCCUPANCY.get(str(room_type), 1)
-    if guests < 1 or guests > max_guests:
-        errors.append(f"The selected room accepts between 1 and {max_guests} guest(s).")
-
-    if booking.get("wants_transportation"):
-        vehicle_type = booking.get("vehicle_type")
-        if vehicle_type not in TRANSPORTATION:
-            errors.append("Please select a valid transportation option.")
-            vehicle = None
-        else:
-            vehicle = TRANSPORTATION[str(vehicle_type)]
-        if booking.get("transport_service") not in TRANSPORT_SERVICES:
-            errors.append("Please select a valid transportation service.")
-        pricing_mode = booking.get("transport_pricing_mode")
-        if vehicle and pricing_mode not in vehicle.get("pricing_modes", ()):
-            errors.append("Please select a valid transportation pricing method.")
+    errors = []
+    kind = booking.get("registration_type")
+    if kind not in ("Individual", "Federation"):
+        errors.append("Choose Individual or Federation registration.")
+    field = "federation_name" if kind == "Federation" else "guest_name"
+    if not str(booking.get(field, "")).strip() or len(str(booking.get(field, ""))) > 150:
+        errors.append("Enter a name of up to 150 characters.")
+    if kind == "Individual":
+        if not booking.get("nationality"):
+            errors.append("Nationality is required.")
+        if not PASSPORT_NUMBER_RE.fullmatch(normalize_passport_number(booking.get("passport_number"))):
+            errors.append("Passport number must contain 5 to 20 letters or numbers.")
         try:
-            if int(booking.get("transport_persons", 0)) < 1:
-                raise ValueError
-        except (TypeError, ValueError):
-            errors.append("Please enter the number of persons using transportation.")
-        if pricing_mode == "per_vehicle":
-            try:
-                if int(booking.get("transport_vehicle_count", 0)) < 1:
-                    raise ValueError
-            except (TypeError, ValueError):
-                errors.append("Please enter the number of vehicles required.")
-        if booking.get("transport_price_pending"):
-            errors.append(
-                "Transportation price is pending. Add the official rate in config.py before confirmation."
-            )
-
+            dob = iso_date(booking.get("date_of_birth"))
+            if not date(1900, 1, 1) <= dob <= date.today():
+                raise ValueError()
+        except (ValueError, TypeError):
+            errors.append("Please enter a valid date of birth.")
+    if not booking.get("phone_valid") or not re.fullmatch(r"\+[1-9]\d{6,14}", str(booking.get("phone", ""))):
+        errors.append("Enter a valid international phone number, including the country code.")
+    if not EMAIL_RE.fullmatch(str(booking.get("email", "")).strip()):
+        errors.append("Enter a valid email address.")
+    try:
+        totals = calculate_booking_totals(booking)
+        for index, service in enumerate(totals["transport_services"], 1):
+            if service["remaining"]:
+                errors.append(f"Transportation {index}: add seats for {service['remaining']} remaining passengers.")
+    except (ValueError, TypeError, KeyError) as exc:
+        errors.append(str(exc))
     return errors
 
+def format_currency(amount: Any, currency: str = "EUR") -> str:
+    if currency != "EUR":
+        raise ValueError("Only EUR is supported.")
+    return f"€{float(amount):,.2f}"
 
 def generate_booking_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"ITKF-{stamp}-{uuid.uuid4().hex[:8].upper()}"
-
+    return f"ITKF-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:12].upper()}"
 
 def current_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")

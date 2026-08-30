@@ -1,67 +1,41 @@
 /**
- * Reliable Google Apps Script backend for the 23rd ITKF booking app.
- * Required properties: SPREADSHEET_ID, DRIVE_FOLDER_ID, BOOKING_API_TOKEN.
- * Optional: INVOICE_FOLDER_ID, COMPANY_NAME, EUR_TO_USD, EUR_TO_EGP.
+ * ITKF request backend v2. Existing Bookings/Invoices rows are preserved.
+ * Properties: SPREADSHEET_ID, BOOKING_API_TOKEN, INVOICE_FOLDER_ID
+ * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
+ * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-
-const BOOKINGS_SHEET = "Bookings";
-const INVOICES_SHEET = "Invoices";
-const MAX_IMAGE_BYTES = 1 * 1024 * 1024;
-
+const VERSION = "2026-08-30-v2";
+const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
-  "Booking ID", "Booking Date", "Guest Name", "Date of Birth", "Passport Number",
-  "Nationality", "Nationality Code",
-  "Phone Country Code", "Phone", "Email", "Personal Photo File ID", "Personal Photo URL",
-  "Passport Photo File ID", "Passport Photo URL", "Hotel", "Meal Plan", "Room Type",
-  "Guests", "Check-in", "Check-out", "Nights", "Nightly Rate EUR", "Vehicle Type",
-  "Transportation Service", "Transportation Pricing Mode", "Transportation Persons",
-  "Transportation Vehicle Count", "Transportation Billed Units",
-  "Transportation Unit Price EGP", "Transportation Unit Price EUR",
-  "Transportation Rate Version", "Transportation Price Per Person EUR", "Room Total EUR",
-  "Transportation Total EUR", "Transportation Total EGP", "Grand Total EUR",
-  "Grand Total USD", "Grand Total EGP",
-  "Invoice No", "Invoice File ID", "Invoice URL", "Invoice Verification Code", "Invoice SHA-256",
-  "Customer Email Sent", "Email Sent At",
-  "Processing Started", "Status", "Last Error"
+  "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
+  "Passport Number","Nationality","Nationality Code","Phone","Email","Hotel","Meal Plan",
+  "Room Type","Number of Rooms","Guests","Check-in","Check-out","Nights","Rooms JSON",
+  "Transportation JSON","Transportation Rate Version","Room Total EUR","Transportation Total EUR",
+  "Grand Total EUR","Invoice No","Invoice Verification Code","Invoice File ID","Invoice URL",
+  "Invoice SHA-256","Customer Email Sent","Email Sent At","Status","Document Status",
+  "Processing Started","Last Error","Request Hash","Booking JSON","Schema Version"
 ];
-
-const TRANSPORT_VEHICLES = [
-  "Limousine", "Hiace (15 Seats)", "Coaster (30 Seats)", "33-Seat Bus", "50-Seat Bus"
-];
-
-const TRANSPORT_RATE_VERSION =
-  "2026-08-27 quotation - EUR preliminary rates";
-
-const TRANSPORT_RATES_EUR = {
-  "One-way Transfer - Airport to Stadium or Hotel": {
-    "Limousine": {mode: "per_vehicle", unit: 23.214286},
-    "Hiace (15 Seats)": {mode: "per_person", unit: 2.500000},
-    "Coaster (30 Seats)": {mode: "per_person", unit: 1.815476},
-    "33-Seat Bus": {mode: "per_person", unit: 1.948052},
-    "50-Seat Bus": {mode: "per_person", unit: 2.321429}
-  },
-  "Full Day Within Cairo": {
-    "Limousine": {mode: "per_vehicle", unit: 80.357143},
-    "Hiace (15 Seats)": {mode: "per_person", unit: 6.666667},
-    "Coaster (30 Seats)": {mode: "per_person", unit: 3.690476},
-    "33-Seat Bus": {mode: "per_person", unit: 4.112554},
-    "50-Seat Bus": {mode: "per_person", unit: 4.714286}
-  },
-  "Evening Service": {
-    "Limousine": {mode: "per_vehicle", unit: 32.142857},
-    "Hiace (15 Seats)": {mode: "per_person", unit: 2.976190},
-    "Coaster (30 Seats)": {mode: "per_person", unit: 1.785714},
-    "33-Seat Bus": {mode: "per_person", unit: 1.893939},
-    "50-Seat Bus": {mode: "per_person", unit: 1.892857}
-  }
-};
-
 const INVOICE_HEADERS = [
-  "Invoice No", "Booking ID", "Created At", "Customer Name", "Customer Email",
-  "Grand Total EUR", "Invoice File ID", "Invoice URL", "Invoice Verification Code",
-  "Invoice SHA-256", "Email Status", "Email Sent At", "Last Error"
+  "Invoice No","Booking ID","Created At","Customer Name","Customer Email","Grand Total EUR",
+  "Invoice File ID","Invoice URL","Invoice Verification Code","Invoice SHA-256","Email Status","Last Error"
 ];
-
+const INVENTORY_HEADERS = ["Hotel","Room Type","Date","Capacity"];
+const ROOM_OCCUPANCY = {"Single":1,"Double":2,"Triple":3,"Quadruple":4,"Suite (2 rooms / 4 persons)":4};
+const TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle";
+const TRANSPORT = {
+  "Limousine (3 Seats)": {capacity:3, prices:[30,30,110,145]},
+  "H1 / Van (7 Seats)": {capacity:7, prices:[50,50,150,170]},
+  "Toyota Hiace (10 Seats)": {capacity:10, prices:[60,60,160,200]},
+  "Coaster (26 Seats)": {capacity:26, prices:[100,100,200,240]},
+  "Bus (50 Seats)": {capacity:50, prices:[190,190,300,400]}
+};
+const SERVICES = {
+  "Airport Transfer": {index:0, hours:0, directions:["Airport to Hotel","Hotel to Airport"]},
+  "Stadium Transfer": {index:1, hours:0, directions:["Hotel to Stadium","Stadium to Hotel"]},
+  "Daily 8 Hours": {index:2, hours:8, directions:[]},
+  "Daily 12 Hours": {index:3, hours:12, directions:[]}
+};
+// Original hotel names and rates retained, using the existing rate per room/night.
 const HOTEL_RATES_EUR = {
   "Tiba Rose El Golf": {
     "Breakfast": {"Single": 80, "Double": 50, "Triple": 45},
@@ -87,756 +61,433 @@ const HOTEL_RATES_EUR = {
   "Hotel Engineering Authority House": {"Breakfast": {"Single": 70, "Double": 45}}
 };
 
-
-function doGet() {
-  return json_({ok: true, service: "itkf-booking-backend", version: "2026-08-27-protected-invoices"});
-}
-
-
+function doGet() { return json_({ok:true,service:"itkf-booking-backend",version:VERSION}); }
 function doPost(e) {
   try {
-    if (!e || !e.postData || !e.postData.contents) {
-      return json_({ok: false, saved: false, error_code: "EMPTY_REQUEST"});
+    const contents = e && e.postData && e.postData.contents;
+    if (!contents || contents.length > 8*1024*1024) throw codedError_("INVALID_REQUEST","Invalid request body.");
+    const req = JSON.parse(contents);
+    if (!req.token || !equal_(String(req.token), prop_("BOOKING_API_TOKEN")))
+      throw codedError_("UNAUTHORIZED","The booking service credentials do not match.");
+    if (req.schema_version !== VERSION) throw codedError_("SCHEMA_VERSION","Update the Apps Script deployment and the application together.");
+    if (req.action === "check_availability") {
+      return json_(locked_(function() {
+        const b = accommodation_(req.booking || {});
+        return {ok:true,availability:availability_(b, rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)))};
+      }));
     }
-    const request = JSON.parse(e.postData.contents);
-    authorize_(request.token);
-    if (request.action === "check_duplicate") {
-      return json_(checkDuplicate_(request.passport_number));
+    if (req.action === "create_booking") return json_(createBooking_(req.booking || {}, req.invoice || {}));
+    if (req.action === "check_duplicate") {
+      return json_({ok:true,exists:passportExists_(rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)),req.passport_number)});
     }
-    if (request.action === "create_booking") {
-      return json_(createBooking_(
-        request.booking || {}, request.images || {},
-        request.quote_signature || "", request.invoice || {}
-      ));
-    }
-    return json_({ok: false, saved: false, error_code: "UNKNOWN_ACTION"});
-  } catch (error) {
-    const code = error && error.code ? String(error.code) : "SERVER_ERROR";
-    return json_({
-      ok: false, saved: false,
-      retryable: code === "BUSY" || code === "TEMPORARY_ERROR",
-      error_code: code, error: safeError_(error)
-    });
+    throw codedError_("UNKNOWN_ACTION","Unsupported action.");
+  } catch (err) {
+    return json_({ok:false,saved:false,error_code:err.code || "SERVER_ERROR",
+      retryable:err.code === "BUSY",error:safeError_(err)});
   }
 }
-
-
-function createBooking_(booking, images, quoteSignature, invoicePayload) {
-  validateBooking_(booking);
-  const invoiceNo = "INV-" + String(booking.booking_id).replace(/^ITKF-/, "");
-  let existing = {};
-  let rowNumber = 0;
-
-  const startLock = LockService.getScriptLock();
-  if (!startLock.tryLock(30000)) throw codedError_("BUSY", "The booking service is busy.");
-  try {
-    const context = ensureSheet_(BOOKINGS_SHEET, BOOKING_HEADERS);
-    rowNumber = findRow_(context.sheet, context.headers, "Booking ID", booking.booking_id);
-    if (rowNumber) {
-      existing = rowObject_(
-        context.headers,
-        context.sheet.getRange(rowNumber, 1, 1, context.headers.length).getValues()[0]
-      );
-      if (String(existing["Status"] || "") === "Confirmed") {
-        return resultFromObject_(existing, true, true, "Booking already saved.");
-      }
-      if (String(existing["Status"] || "") === "Processing" &&
-          !processingIsStale_(existing["Processing Started"])) {
-        return {
-          ok: false, saved: false, row_saved: true, retryable: true,
-          error_code: "BUSY", error: "This booking is still being processed."
-        };
-      }
-    }
-
-    const duplicatePassportRow = findRow_(
-      context.sheet, context.headers, "Passport Number", booking.passport_number
-    );
-    if (duplicatePassportRow && duplicatePassportRow !== rowNumber) {
-      throw codedError_(
-        "DUPLICATE_PASSPORT",
-        "This passport number is already registered."
-      );
-    }
-
-    recalculateBooking_(booking, quoteSignature);
-    booking.invoice_no = invoiceNo;
-    verifyInvoiceVerification_(booking, invoiceNo);
-    const initial = bookingColumns_(booking);
-    initial["Invoice No"] = existing["Invoice No"] || invoiceNo;
-    initial["Processing Started"] = new Date().toISOString();
-    initial["Status"] = "Processing";
-    initial["Last Error"] = "";
-    rowNumber = writeRow_(context.sheet, context.headers, rowNumber, initial, existing);
-    SpreadsheetApp.flush();
-  } finally {
-    startLock.releaseLock();
-  }
-
-  let personal = existingFile_(existing, "Personal Photo File ID", "Personal Photo URL");
-  let passport = existingFile_(existing, "Passport Photo File ID", "Passport Photo URL");
-  const fileErrors = [];
-  if (!personal.fileId && images.personal_photo) {
-    try {
-      personal = saveImage_(images.personal_photo, booking.booking_id, "personal-photo");
-    } catch (error) {
-      fileErrors.push("Personal photo: " + safeError_(error));
-    }
-  }
-  if (!passport.fileId && images.passport_photo) {
-    try {
-      passport = saveImage_(images.passport_photo, booking.booking_id, "passport");
-    } catch (error) {
-      fileErrors.push("Passport photo: " + safeError_(error));
-    }
-  }
-  if (!passport.fileId) fileErrors.push("Passport photo was not stored.");
-
-  let invoice = existingFile_(existing, "Invoice File ID", "Invoice URL");
-  invoice.sha256 = String(existing["Invoice SHA-256"] || "");
-  invoice.verificationCode = String(existing["Invoice Verification Code"] || "");
-  let invoiceError = "";
-  if (!invoice.fileId) {
-    try {
-      invoice = saveInvoicePdf_(invoicePayload, booking, invoiceNo);
-    } catch (error) {
-      invoiceError = safeError_(error);
-    }
-  }
-
-  let emailSent = truthy_(existing["Customer Email Sent"]);
-  let emailSentAt = String(existing["Email Sent At"] || "");
-  let emailError = "";
-  if (!emailSent && invoice.fileId) {
-    try {
-      sendInvoiceEmail_(booking, invoiceNo, invoice.fileId, invoice.verificationCode);
-      emailSent = true;
-      emailSentAt = new Date().toISOString();
-    } catch (error) {
-      emailError = safeError_(error);
-    }
-  }
-
-  let status = "Confirmed";
-  const errors = [];
-  if (fileErrors.length) {
-    status = "Saved - file upload failed";
-    errors.push(fileErrors.join(" | "));
-  }
-  if (invoiceError) {
-    status = "Saved - invoice failed";
-    errors.push("Invoice: " + invoiceError);
-  } else if (!emailSent) {
-    status = "Saved - email failed";
-    errors.push("Email: " + (emailError || "Email was not sent."));
-  }
-
-  const finalData = bookingColumns_(booking);
-  finalData["Personal Photo File ID"] = personal.fileId || "";
-  finalData["Personal Photo URL"] = personal.url || "";
-  finalData["Passport Photo File ID"] = passport.fileId || "";
-  finalData["Passport Photo URL"] = passport.url || "";
-  finalData["Invoice No"] = invoiceNo;
-  finalData["Invoice File ID"] = invoice.fileId || "";
-  finalData["Invoice URL"] = invoice.url || "";
-  finalData["Invoice Verification Code"] = invoice.verificationCode ||
-    String(booking.invoice_verification_code || "");
-  finalData["Invoice SHA-256"] = invoice.sha256 || "";
-  finalData["Customer Email Sent"] = emailSent;
-  finalData["Email Sent At"] = emailSentAt;
-  finalData["Processing Started"] = "";
-  finalData["Status"] = status;
-  finalData["Last Error"] = errors.join(" | ");
-
-  const finishLock = LockService.getScriptLock();
-  if (!finishLock.tryLock(30000)) {
-    throw codedError_("BUSY", "The booking was captured but final status is pending.");
-  }
-  try {
-    const context = ensureSheet_(BOOKINGS_SHEET, BOOKING_HEADERS);
-    rowNumber = findRow_(context.sheet, context.headers, "Booking ID", booking.booking_id);
-    if (!rowNumber) {
-      throw codedError_("TEMPORARY_ERROR", "The captured booking row could not be found.");
-    }
-    writeRow_(context.sheet, context.headers, rowNumber, finalData, {});
-    upsertInvoiceLog_(booking, finalData);
-    SpreadsheetApp.flush();
-  } finally {
-    finishLock.releaseLock();
-  }
-
-  return resultFromObject_(finalData, true, fileErrors.length === 0, "Booking saved.");
+function locked_(callback) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw codedError_("BUSY","The service is busy. Retry this same request.");
+  try { return callback(); } finally { lock.releaseLock(); }
 }
-
-
-function recalculateBooking_(booking, quoteSignature) {
-  verifyQuoteSignature_(booking, quoteSignature);
-  const suppliedTransportTotalEur = booking.transport_total_eur;
-  const suppliedGrandTotalEur = booking.grand_total_eur;
-  booking.nights = nightsBetween_(booking.check_in, booking.check_out);
-  if (booking.nights < 1 || booking.nights > 60) {
-    throw codedError_("VALIDATION_ERROR", "Invalid number of nights.");
-  }
-  const hotel = HOTEL_RATES_EUR[booking.hotel];
-  const plan = hotel && hotel[booking.meal_plan];
-  const rate = plan && plan[booking.room_type];
-  if (rate === undefined || rate === null) {
-    throw codedError_("VALIDATION_ERROR", "Invalid hotel, meal plan or room type.");
-  }
-
-  let transportUnitEgp = 0;
-  let transportUnitEur = 0;
-  let transportTotalEgp = 0;
-  let transportTotalEur = 0;
-  let transportBilledUnits = 0;
-  const eurToEgp = optionalNumberProp_("EUR_TO_EGP", 56);
-  if (truthy_(booking.wants_transportation)) {
-    if (TRANSPORT_VEHICLES.indexOf(String(booking.vehicle_type)) < 0) {
-      throw codedError_("VALIDATION_ERROR", "Invalid vehicle type.");
-    }
-    const serviceRates = TRANSPORT_RATES_EUR[String(booking.transport_service || "")];
-    const selectedRate = serviceRates && serviceRates[String(booking.vehicle_type)];
-    if (!selectedRate) {
-      throw codedError_("VALIDATION_ERROR", "Invalid transportation service.");
-    }
-    if (String(booking.transport_pricing_mode || "") !== selectedRate.mode) {
-      throw codedError_("VALIDATION_ERROR", "Invalid transportation pricing method.");
-    }
-    const persons = Number(booking.transport_persons || 0);
-    if (!Number.isInteger(persons) || persons < 1) {
-      throw codedError_("VALIDATION_ERROR", "Invalid transportation person count.");
-    }
-    const vehicleCount = Number(booking.transport_vehicle_count || 0);
-    if (selectedRate.mode === "per_vehicle" &&
-        (!Number.isInteger(vehicleCount) || vehicleCount < 1)) {
-      throw codedError_("VALIDATION_ERROR", "Invalid transportation vehicle count.");
-    }
-    transportBilledUnits = selectedRate.mode === "per_person" ? persons : vehicleCount;
-    transportUnitEur = rate_(selectedRate.unit);
-    transportUnitEgp = money_(transportUnitEur * eurToEgp);
-    transportTotalEur = money_(Number(selectedRate.unit) * transportBilledUnits);
-    transportTotalEgp = money_(transportTotalEur * eurToEgp);
-  }
-
-  const roomTotal = money_(Number(rate) * booking.nights);
-  const grandEur = money_(roomTotal + transportTotalEur);
-  booking.nightly_rate_eur = money_(rate);
-  booking.room_total_eur = roomTotal;
-  booking.transport_unit_price_egp = transportUnitEgp;
-  booking.transport_unit_price_eur = transportUnitEur;
-  booking.transport_price_per_person_eur =
-    booking.transport_pricing_mode === "per_person" ? transportUnitEur : 0;
-  booking.transport_billed_units = transportBilledUnits;
-  booking.transport_total_eur = transportTotalEur;
-  booking.transport_total_egp = transportTotalEgp;
-  booking.transport_rate_version = TRANSPORT_RATE_VERSION;
-  booking.grand_total_eur = grandEur;
-  booking.grand_total_usd = money_(grandEur * optionalNumberProp_("EUR_TO_USD", 56 / 49.5));
-  booking.grand_total_egp = money_(roomTotal * eurToEgp + transportTotalEgp);
-
-  if (suppliedTransportTotalEur !== undefined && suppliedTransportTotalEur !== null &&
-      suppliedTransportTotalEur !== "" &&
-      Math.abs(Number(suppliedTransportTotalEur) - transportTotalEur) > 0.011) {
-    throw codedError_("QUOTE_CHANGED", "Transportation quote changed. Please review again.");
-  }
-  if (suppliedGrandTotalEur !== undefined && suppliedGrandTotalEur !== null &&
-      suppliedGrandTotalEur !== "" &&
-      Math.abs(Number(suppliedGrandTotalEur) - grandEur) > 0.011) {
-    throw codedError_("QUOTE_CHANGED", "Booking total changed. Please review again.");
-  }
+function normalizeGuestName_(v) { return String(v || "").trim().replace(/\s+/g," ").toUpperCase(); }
+function normalizePassportNumber_(v) { return String(v || "").toUpperCase().replace(/[^A-Z0-9]/g,""); }
+function int_(v,label,maximum,zero) {
+  if (typeof v === "boolean" || !/^\d+$/.test(String(v))) throw codedError_("VALIDATION_ERROR",label+" must be a whole number.");
+  const n=Number(v);
+  if (!Number.isSafeInteger(n) || n<(zero ? 0:1) || n>maximum) throw codedError_("VALIDATION_ERROR","Invalid "+label+".");
+  return n;
 }
-
-
-function bookingColumns_(booking) {
-  return {
-    "Booking ID": booking.booking_id, "Booking Date": booking.booking_date,
-    "Guest Name": booking.guest_name, "Date of Birth": booking.date_of_birth,
-    "Passport Number": booking.passport_number, "Nationality": booking.nationality,
-    "Nationality Code": booking.nationality_code, "Phone Country Code": booking.phone_country_code,
-    "Phone": booking.phone, "Email": booking.email, "Hotel": booking.hotel,
-    "Meal Plan": booking.meal_plan, "Room Type": booking.room_type,
-    "Guests": Number(booking.guests || 0), "Check-in": booking.check_in,
-    "Check-out": booking.check_out, "Nights": booking.nights,
-    "Nightly Rate EUR": money_(booking.nightly_rate_eur),
-    "Vehicle Type": truthy_(booking.wants_transportation) ? booking.vehicle_type : "-",
-    "Transportation Service": truthy_(booking.wants_transportation) ? booking.transport_service : "-",
-    "Transportation Pricing Mode": truthy_(booking.wants_transportation) ? booking.transport_pricing_mode : "-",
-    "Transportation Persons": truthy_(booking.wants_transportation) ? Number(booking.transport_persons || 0) : 0,
-    "Transportation Vehicle Count": truthy_(booking.wants_transportation) ? Number(booking.transport_vehicle_count || 0) : 0,
-    "Transportation Billed Units": truthy_(booking.wants_transportation) ? Number(booking.transport_billed_units || 0) : 0,
-    "Transportation Unit Price EGP": money_(booking.transport_unit_price_egp),
-    "Transportation Unit Price EUR": rate_(booking.transport_unit_price_eur),
-    "Transportation Rate Version": truthy_(booking.wants_transportation) ? booking.transport_rate_version : "-",
-    "Transportation Price Per Person EUR": rate_(booking.transport_price_per_person_eur),
-    "Room Total EUR": money_(booking.room_total_eur),
-    "Transportation Total EUR": money_(booking.transport_total_eur),
-    "Transportation Total EGP": money_(booking.transport_total_egp),
-    "Grand Total EUR": money_(booking.grand_total_eur),
-    "Grand Total USD": money_(booking.grand_total_usd),
-    "Grand Total EGP": money_(booking.grand_total_egp)
-  };
-}
-
-
-function saveInvoicePdf_(payload, booking, invoiceNo) {
-  if (!payload || String(payload.mime_type || "").toLowerCase() !== "application/pdf" ||
-      !payload.base64) {
-    throw codedError_("INVALID_INVOICE", "A PDF invoice payload is required.");
-  }
-  if (String(payload.filename || "") !== invoiceNo + ".pdf") {
-    throw codedError_("INVALID_INVOICE", "Invoice filename does not match its number.");
-  }
-  if (String(payload.verification_code || "") !== String(booking.invoice_verification_code || "")) {
-    throw codedError_("INVALID_INVOICE", "Invoice verification code does not match.");
-  }
-  const bytes = Utilities.base64Decode(String(payload.base64));
-  if (!bytes.length || bytes.length > 5 * 1024 * 1024) {
-    throw codedError_("INVALID_INVOICE", "Invoice PDF is empty or exceeds 5 MB.");
-  }
-  const magic = bytes.slice(0, 5).map(function(value) {
-    return String.fromCharCode((Number(value) + 256) % 256);
-  }).join("");
-  if (magic !== "%PDF-") {
-    throw codedError_("INVALID_INVOICE", "Invoice content is not a PDF.");
-  }
-  const sha256 = digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes));
-  if (!constantTimeEqual_(sha256, String(payload.sha256 || "").toLowerCase())) {
-    throw codedError_("INVALID_INVOICE", "Invoice integrity check failed.");
-  }
-  const pdfBlob = Utilities.newBlob(bytes, "application/pdf", invoiceNo + ".pdf");
-  const folderId = optionalProp_("INVOICE_FOLDER_ID") || prop_("DRIVE_FOLDER_ID");
-  const pdfFile = DriveApp.getFolderById(folderId).createFile(pdfBlob);
-  return {
-    fileId: pdfFile.getId(), url: pdfFile.getUrl(), sha256: sha256,
-    verificationCode: String(payload.verification_code)
-  };
-}
-
-
-function sendInvoiceEmail_(booking, invoiceNo, invoiceFileId, verificationCode) {
-  if (MailApp.getRemainingDailyQuota() < 1) {
-    throw codedError_("EMAIL_QUOTA_EXHAUSTED", "Daily email quota is exhausted.");
-  }
-  const companyName = optionalProp_("COMPANY_NAME") ||
-    "Egyptian Traditional Karate Federation";
-  const subject = invoiceNo + " - 23rd ITKF Championship Booking Invoice";
-  const body = "Dear " + booking.guest_name + ",\n\nYour booking has been confirmed. " +
-    "Booking ID: " + booking.booking_id + "\nInvoice: " + invoiceNo +
-    "\nVerification Code: " + verificationCode +
-    "\nGrand Total: EUR " + money_(booking.grand_total_eur).toFixed(2) +
-    "\n\nYour invoice is attached.";
-  const htmlBody = "<p>Dear " + escapeHtml_(booking.guest_name) + ",</p>" +
-    "<p>Your booking has been confirmed.</p>" +
-    "<p><b>Booking ID:</b> " + escapeHtml_(booking.booking_id) + "<br>" +
-    "<b>Invoice:</b> " + escapeHtml_(invoiceNo) + "<br>" +
-    "<b>Verification Code:</b> " + escapeHtml_(verificationCode) + "<br>" +
-    "<b>Grand Total:</b> EUR " + money_(booking.grand_total_eur).toFixed(2) + "</p>" +
-    "<p>Your invoice is attached.</p>";
-  MailApp.sendEmail({
-    to: booking.email, subject: subject, body: body, htmlBody: htmlBody, name: companyName,
-    attachments: [DriveApp.getFileById(invoiceFileId).getBlob().setName(invoiceNo + ".pdf")]
-  });
-}
-
-
-function retryPendingEmails() {
-  const quota = Math.min(MailApp.getRemainingDailyQuota(), 50);
-  if (quota < 1) return;
-  const context = ensureSheet_(BOOKINGS_SHEET, BOOKING_HEADERS);
-  if (context.sheet.getLastRow() < 2) return;
-  const rows = context.sheet.getRange(
-    2, 1, context.sheet.getLastRow() - 1, context.headers.length
-  ).getValues();
-  let sent = 0;
-  rows.forEach(function(row, index) {
-    if (sent >= quota) return;
-    const item = rowObject_(context.headers, row);
-    if (String(item["Status"] || "") !== "Saved - email failed") return;
-    if (!item["Invoice File ID"] || truthy_(item["Customer Email Sent"])) return;
-    try {
-      sendInvoiceEmail_({
-        guest_name: item["Guest Name"], booking_id: item["Booking ID"],
-        email: item["Email"], grand_total_eur: item["Grand Total EUR"]
-      }, item["Invoice No"], item["Invoice File ID"], item["Invoice Verification Code"]);
-      item["Customer Email Sent"] = true;
-      item["Email Sent At"] = new Date().toISOString();
-      item["Status"] = "Confirmed";
-      item["Last Error"] = "";
-      writeRow_(context.sheet, context.headers, index + 2, item, {});
-      upsertInvoiceLog_({
-        booking_id: item["Booking ID"], booking_date: item["Booking Date"],
-        guest_name: item["Guest Name"], email: item["Email"],
-        grand_total_eur: item["Grand Total EUR"]
-      }, item);
-      sent += 1;
-    } catch (error) {
-      item["Last Error"] = "Email: " + safeError_(error);
-      writeRow_(context.sheet, context.headers, index + 2, item, {});
-    }
-  });
-  SpreadsheetApp.flush();
-}
-
-
-function installHourlyEmailRetryTrigger() {
-  const exists = ScriptApp.getProjectTriggers().some(function(trigger) {
-    return trigger.getHandlerFunction() === "retryPendingEmails";
-  });
-  if (!exists) {
-    ScriptApp.newTrigger("retryPendingEmails").timeBased().everyHours(1).create();
-  }
-}
-
-
-function upsertInvoiceLog_(booking, data) {
-  if (!data["Invoice No"]) return;
-  const context = ensureSheet_(INVOICES_SHEET, INVOICE_HEADERS);
-  const row = findRow_(context.sheet, context.headers, "Invoice No", data["Invoice No"]);
-  const log = {
-    "Invoice No": data["Invoice No"], "Booking ID": booking.booking_id,
-    "Created At": booking.booking_date, "Customer Name": booking.guest_name,
-    "Customer Email": booking.email, "Grand Total EUR": money_(booking.grand_total_eur),
-    "Invoice File ID": data["Invoice File ID"] || "",
-    "Invoice URL": data["Invoice URL"] || "",
-    "Invoice Verification Code": data["Invoice Verification Code"] || "",
-    "Invoice SHA-256": data["Invoice SHA-256"] || "",
-    "Email Status": truthy_(data["Customer Email Sent"]) ? "Sent" : "Failed",
-    "Email Sent At": data["Email Sent At"] || "", "Last Error": data["Last Error"] || ""
-  };
-  writeRow_(context.sheet, context.headers, row, log, {});
-}
-
-
-function checkDuplicate_(passportNumber) {
-  const context = ensureSheet_(BOOKINGS_SHEET, BOOKING_HEADERS);
-  const normalized = normalizePassportNumber_(passportNumber);
-  return {
-    ok: true,
-    exists: Boolean(findRow_(context.sheet, context.headers, "Passport Number", normalized))
-  };
-}
-
-
-function ensureSheet_(name, requiredHeaders) {
-  const spreadsheet = SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
-  let sheet = spreadsheet.getSheetByName(name);
-  if (!sheet) sheet = spreadsheet.insertSheet(name);
-  let headers = [];
-  if (sheet.getLastColumn() > 0) {
-    headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  }
-  requiredHeaders.forEach(function(header) {
-    if (headers.indexOf(header) < 0) headers.push(header);
-  });
-  if (!headers.length) headers = requiredHeaders.slice();
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  sheet.setFrozenRows(1);
-  sheet.getRange(1, 1, 1, headers.length)
-    .setFontWeight("bold").setBackground("#C8102E").setFontColor("#FFFFFF");
-  return {sheet: sheet, headers: headers};
-}
-
-
-function findRow_(sheet, headers, headerName, value) {
-  if (!value || sheet.getLastRow() < 2) return 0;
-  const column = headers.indexOf(headerName) + 1;
-  if (column < 1) return 0;
-  const match = sheet.getRange(2, column, sheet.getLastRow() - 1, 1)
-    .createTextFinder(String(value)).matchEntireCell(true).findNext();
-  return match ? match.getRow() : 0;
-}
-
-
-function writeRow_(sheet, headers, rowNumber, data, existing) {
-  const values = headers.map(function(header) {
-    if (Object.prototype.hasOwnProperty.call(data, header)) return data[header];
-    if (existing && Object.prototype.hasOwnProperty.call(existing, header)) return existing[header];
-    return "";
-  });
-  if (!rowNumber) rowNumber = sheet.getLastRow() + 1;
-  sheet.getRange(rowNumber, 1, 1, headers.length).setValues([values]);
-  const bookingIdColumn = headers.indexOf("Booking ID") + 1;
-  const passportColumn = headers.indexOf("Passport Number") + 1;
-  const phoneColumn = headers.indexOf("Phone") + 1;
-  if (bookingIdColumn > 0) sheet.getRange(rowNumber, bookingIdColumn).setNumberFormat("@");
-  if (passportColumn > 0) sheet.getRange(rowNumber, passportColumn).setNumberFormat("@");
-  if (phoneColumn > 0) sheet.getRange(rowNumber, phoneColumn).setNumberFormat("@");
-  return rowNumber;
-}
-
-
-function rowObject_(headers, values) {
-  const object = {};
-  headers.forEach(function(header, index) { object[header] = values[index]; });
-  return object;
-}
-
-
-function saveImage_(image, bookingId, kind) {
-  if (!image || !image.base64 || !image.mime_type || !image.extension) {
-    throw new Error("Incomplete image payload.");
-  }
-  const allowed = {"image/jpeg": "jpg", "image/png": "png"};
-  const extension = allowed[String(image.mime_type).toLowerCase()];
-  if (!extension || extension !== String(image.extension).toLowerCase()) {
-    throw new Error("Unsupported image type.");
-  }
-  const bytes = Utilities.base64Decode(image.base64);
-  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) {
-    throw new Error("Image is empty or exceeds the processed 1 MB limit.");
-  }
-  const safeId = String(bookingId).replace(/[^A-Za-z0-9_-]/g, "");
-  const filename = safeId + "_" + kind + "_" + Utilities.getUuid() + "." + extension;
-  const file = DriveApp.getFolderById(prop_("DRIVE_FOLDER_ID"))
-    .createFile(Utilities.newBlob(bytes, image.mime_type, filename));
-  return {fileId: file.getId(), url: file.getUrl()};
-}
-
-
-function existingFile_(object, idHeader, urlHeader) {
-  return {fileId: String(object[idHeader] || ""), url: String(object[urlHeader] || "")};
-}
-
-
-function resultFromObject_(data, saved, filesOk, message) {
-  return {
-    ok: Boolean(saved), saved: Boolean(saved), files_ok: Boolean(filesOk),
-    booking_id: String(data["Booking ID"] || ""), status: String(data["Status"] || ""),
-    personal_photo_url: String(data["Personal Photo URL"] || ""),
-    passport_photo_url: String(data["Passport Photo URL"] || ""),
-    invoice_no: String(data["Invoice No"] || ""), invoice_url: String(data["Invoice URL"] || ""),
-    invoice_verification_code: String(data["Invoice Verification Code"] || ""),
-    invoice_sha256: String(data["Invoice SHA-256"] || ""),
-    invoice_created: Boolean(data["Invoice File ID"]),
-    customer_email_sent: truthy_(data["Customer Email Sent"]),
-    email_error: truthy_(data["Customer Email Sent"]) ? "" : String(data["Last Error"] || ""),
-    nightly_rate_eur: number_(data["Nightly Rate EUR"]),
-    room_total_eur: number_(data["Room Total EUR"]),
-    transport_unit_price_egp: number_(data["Transportation Unit Price EGP"]),
-    transport_unit_price_eur: number_(data["Transportation Unit Price EUR"]),
-    transport_billed_units: number_(data["Transportation Billed Units"]),
-    transport_pricing_label: String(data["Transportation Pricing Mode"] || "") === "per_person"
-      ? "Per Person" : (String(data["Transportation Pricing Mode"] || "") === "per_vehicle"
-        ? "Full Vehicle" : "Not requested"),
-    transport_rate_version: String(data["Transportation Rate Version"] || ""),
-    transport_price_per_person_eur: number_(data["Transportation Price Per Person EUR"]),
-    transport_total_eur: number_(data["Transportation Total EUR"]),
-    transport_total_egp: number_(data["Transportation Total EGP"]),
-    grand_total_eur: number_(data["Grand Total EUR"]),
-    grand_total_usd: number_(data["Grand Total USD"]),
-    grand_total_egp: number_(data["Grand Total EGP"]), message: message || ""
-  };
-}
-
-
-function validateBooking_(booking) {
-  booking.guest_name = normalizeGuestName_(booking.guest_name);
-  booking.passport_number = normalizePassportNumber_(booking.passport_number);
-  const required = [
-    "booking_id", "booking_date", "guest_name", "date_of_birth", "passport_number",
-    "nationality", "nationality_code",
-    "phone_country_code", "phone", "email", "hotel", "meal_plan", "room_type",
-    "check_in", "check_out"
-  ];
-  required.forEach(function(field) {
-    if (booking[field] === undefined || booking[field] === null ||
-        String(booking[field]).trim() === "") {
-      throw codedError_("VALIDATION_ERROR", "Missing booking field: " + field);
-    }
-  });
-  if (!/^\+[1-9]\d{6,14}$/.test(String(booking.phone))) {
-    throw codedError_("VALIDATION_ERROR", "Phone must be stored in international E.164 format.");
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(booking.email))) {
-    throw codedError_("VALIDATION_ERROR", "Invalid email address.");
-  }
-  if (!/^[A-Z0-9]{5,20}$/.test(String(booking.passport_number))) {
-    throw codedError_(
-      "VALIDATION_ERROR",
-      "Passport number must contain 5 to 20 letters or numbers."
-    );
-  }
-  const dateOfBirth = isoDate_(booking.date_of_birth);
-  const today = new Date();
-  if (dateOfBirth.getUTCFullYear() < 1900 || dateOfBirth.getTime() > today.getTime()) {
-    throw codedError_("VALIDATION_ERROR", "Invalid date of birth.");
-  }
-}
-
-
-function normalizePassportNumber_(value) {
-  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-
-function normalizeGuestName_(value) {
-  return String(value || "").trim().replace(/\s+/g, " ").toUpperCase();
-}
-
-
-function nightsBetween_(checkIn, checkOut) {
-  const start = isoDate_(checkIn);
-  const end = isoDate_(checkOut);
-  return Math.round((end.getTime() - start.getTime()) / 86400000);
-}
-
-
-function isoDate_(value) {
-  const parts = String(value).split("-");
-  if (parts.length !== 3) throw codedError_("VALIDATION_ERROR", "Invalid ISO date.");
-  const parsed = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
-  if (isNaN(parsed.getTime())) throw codedError_("VALIDATION_ERROR", "Invalid ISO date.");
-  return parsed;
-}
-
-
-function processingIsStale_(value) {
-  const timestamp = new Date(String(value || "")).getTime();
-  return !timestamp || Date.now() - timestamp > 5 * 60 * 1000;
-}
-
-
-function truthy_(value) {
-  return value === true || String(value).toLowerCase() === "true" || String(value) === "1";
-}
-
-
-function money_(value) {
-  return Math.round((Number(value) || 0) * 100) / 100;
-}
-
-
-function rate_(value) {
-  return Math.round((Number(value) || 0) * 1000000) / 1000000;
-}
-
-
-function canonicalQuote_(booking) {
-  const wantsTransport = truthy_(booking.wants_transportation);
-  return [
-    String(booking.booking_id || ""), String(booking.hotel || ""),
-    String(booking.meal_plan || ""), String(booking.room_type || ""),
-    String(Number(booking.nights || 0)), wantsTransport ? "1" : "0",
-    wantsTransport ? String(booking.vehicle_type || "-") : "-",
-    wantsTransport ? String(booking.transport_service || "-") : "-",
-    wantsTransport ? String(booking.transport_pricing_mode || "-") : "-",
-    wantsTransport ? String(Number(booking.transport_persons || 0)) : "0",
-    wantsTransport ? String(Number(booking.transport_vehicle_count || 0)) : "0",
-    money_(booking.transport_unit_price_egp).toFixed(2),
-    money_(booking.transport_unit_price_eur).toFixed(2),
-    wantsTransport ? String(booking.transport_rate_version || "-") : "-"
-  ].join("\n");
-}
-
-
-function invoiceVerificationMessage_(booking, invoiceNo) {
-  return [
-    String(invoiceNo || ""), String(booking.booking_id || ""),
-    String(booking.email || ""), money_(booking.grand_total_eur).toFixed(2)
-  ].join("\n");
-}
-
-
-function hmacHex_(message) {
-  return digestHex_(Utilities.computeHmacSha256Signature(
-    String(message), prop_("BOOKING_API_TOKEN"), Utilities.Charset.UTF_8
-  ));
-}
-
-
-function digestHex_(bytes) {
-  return bytes.map(function(value) {
-    const normalized = (Number(value) + 256) % 256;
-    return normalized.toString(16).padStart(2, "0");
-  }).join("");
-}
-
-
-function constantTimeEqual_(left, right) {
-  const first = String(left || "");
-  const second = String(right || "");
-  let different = first.length ^ second.length;
-  const length = Math.max(first.length, second.length);
-  for (let index = 0; index < length; index += 1) {
-    different |= (first.charCodeAt(index) || 0) ^ (second.charCodeAt(index) || 0);
-  }
-  return different === 0;
-}
-
-
-function verifyQuoteSignature_(booking, providedSignature) {
-  const expected = hmacHex_(canonicalQuote_(booking));
-  if (!constantTimeEqual_(expected, String(providedSignature || "").toLowerCase())) {
-    throw codedError_("INVALID_QUOTE", "Booking price verification failed.");
-  }
-}
-
-
-function verifyInvoiceVerification_(booking, invoiceNo) {
-  const digest = hmacHex_(invoiceVerificationMessage_(booking, invoiceNo)).toUpperCase().slice(0, 16);
-  const expected = digest.match(/.{1,4}/g).join("-");
-  if (!constantTimeEqual_(expected, String(booking.invoice_verification_code || "").toUpperCase())) {
-    throw codedError_("INVALID_INVOICE", "Invoice verification code is invalid.");
-  }
-}
-
-
-function number_(value) {
-  const parsed = Number(value);
-  return isFinite(parsed) ? parsed : 0;
-}
-
-
-function optionalNumberProp_(name, fallback) {
-  const raw = PropertiesService.getScriptProperties().getProperty(name);
-  return raw !== null && raw !== "" && isFinite(Number(raw)) ? Number(raw) : fallback;
-}
-
-
-function optionalProp_(name) {
-  return PropertiesService.getScriptProperties().getProperty(name) || "";
-}
-
-
-function prop_(name) {
-  const value = optionalProp_(name);
-  if (!value) throw codedError_("MISSING_PROPERTY", "Missing Script Property: " + name);
+function iso_(v) {
+  const value = String(v);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw codedError_("VALIDATION_ERROR","Invalid date.");
+  const d = new Date(value+"T00:00:00Z");
+  if (!isFinite(d.getTime()) || d.toISOString().slice(0,10)!==value) throw codedError_("VALIDATION_ERROR","Invalid date.");
   return value;
 }
-
-
-function authorize_(providedToken) {
-  if (!providedToken || String(providedToken) !== prop_("BOOKING_API_TOKEN")) {
-    throw codedError_("UNAUTHORIZED", "Unauthorized request.");
+function nights_(start,end) {
+  const count=(Date.parse(iso_(end))-Date.parse(iso_(start)))/86400000;
+  if (!Number.isInteger(count) || count<1 || count>60) throw codedError_("VALIDATION_ERROR","Stay must be 1 to 60 nights.");
+  return count;
+}
+function dates_(start,end) {
+  const count=nights_(start,end), time=Date.parse(start);
+  return Array.from({length:count},(_,i)=>new Date(time+i*86400000).toISOString().slice(0,10));
+}
+function minutes_(v) {
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(v))) throw codedError_("VALIDATION_ERROR","Invalid service time.");
+  const p=v.split(":").map(Number); return p[0]*60+p[1];
+}
+function accommodation_(raw) {
+  const plans=HOTEL_RATES_EUR[raw.hotel], rates=plans && plans[raw.meal_plan];
+  if (!rates) throw codedError_("VALIDATION_ERROR","Invalid hotel or meal plan.");
+  const b={hotel:raw.hotel,meal_plan:raw.meal_plan,check_in:iso_(raw.check_in),check_out:iso_(raw.check_out)};
+  b.nights=nights_(b.check_in,b.check_out);
+  if (!Array.isArray(raw.rooms) || !raw.rooms.length || raw.rooms.length>Object.keys(rates).length)
+    throw codedError_("VALIDATION_ERROR","Choose at least one valid room type.");
+  const seen={}; b.guests=0; b.room_count=0; b.room_total_eur=0;
+  b.rooms=raw.rooms.map(function(r) {
+    if (!r || !Object.prototype.hasOwnProperty.call(rates,r.room_type) || seen[r.room_type])
+      throw codedError_("VALIDATION_ERROR","Invalid or duplicate room type.");
+    seen[r.room_type]=true;
+    const quantity=int_(r.quantity,"room quantity",5000,false), unit=rates[r.room_type];
+    b.guests+=quantity*ROOM_OCCUPANCY[r.room_type]; b.room_count+=quantity;
+    const total=money_(quantity*unit*b.nights); b.room_total_eur+=total;
+    return {room_type:r.room_type,quantity:quantity,unit_rate_eur:unit,total_eur:total};
+  });
+  b.room_total_eur=money_(b.room_total_eur);
+  return b;
+}
+function transport_(raw) {
+  if (!Array.isArray(raw) || raw.length>60) throw codedError_("VALIDATION_ERROR","Invalid transportation list.");
+  return raw.map(function(r) {
+    if (!r || !Object.prototype.hasOwnProperty.call(SERVICES,r.service)) throw codedError_("VALIDATION_ERROR","Invalid transportation service.");
+    const s=SERVICES[r.service], date=iso_(r.date);
+    if (s.directions.length && s.directions.indexOf(r.direction)<0) throw codedError_("VALIDATION_ERROR","Choose a transfer direction.");
+    const duration=minutes_(r.end_time)-minutes_(r.start_time)+(r.ends_next_day===true ? 1440:0);
+    if (duration<=0 || duration>1440 || (s.hours && duration>s.hours*60))
+      throw codedError_("VALIDATION_ERROR","The time range exceeds the selected daily package.");
+    const persons=int_(r.persons,"passengers",5000,false);
+    if (!r.vehicles || Array.isArray(r.vehicles) || typeof r.vehicles!=="object") throw codedError_("VALIDATION_ERROR","Select vehicles.");
+    let seats=0,total=0; const vehicles={},lines=[];
+    Object.keys(r.vehicles).forEach(function(name) {
+      if (!Object.prototype.hasOwnProperty.call(TRANSPORT,name)) throw codedError_("VALIDATION_ERROR","Unknown vehicle.");
+      const qty=int_(r.vehicles[name],"vehicle quantity",100,true);
+      if (!qty) return;
+      const vehicle=TRANSPORT[name], unit=vehicle.prices[s.index];
+      vehicles[name]=qty; seats+=qty*vehicle.capacity; total+=qty*unit;
+      lines.push({vehicle:name,quantity:qty,unit_price_eur:unit,total_eur:money_(qty*unit)});
+    });
+    if (seats<persons) throw codedError_("VALIDATION_ERROR","Add seats for "+(persons-seats)+" remaining passengers.");
+    return {date:date,service:r.service,direction:s.directions.length?r.direction:"",
+      start_time:r.start_time,end_time:r.end_time,ends_next_day:r.ends_next_day===true,
+      duration_minutes:duration,persons:persons,vehicles:vehicles,seats:seats,remaining:0,
+      vehicle_lines:lines,total_eur:money_(total)};
+  });
+}
+function normalizeBooking_(raw) {
+  if (raw.schema_version!==VERSION) throw codedError_("SCHEMA_VERSION","The app and backend must use the same version.");
+  if (!/^ITKF-\d{8}-[A-F0-9]{12}$/.test(String(raw.booking_id))) throw codedError_("VALIDATION_ERROR","Invalid request ID.");
+  const type=raw.registration_type;
+  if (["Individual","Federation"].indexOf(type)<0) throw codedError_("VALIDATION_ERROR","Invalid registration type.");
+  const name=type==="Individual"?normalizeGuestName_(raw.guest_name):String(raw.federation_name||"").trim();
+  if (!name || name.length>150) throw codedError_("VALIDATION_ERROR","Enter a name of up to 150 characters.");
+  const email=String(raw.email||"").trim(), phone=String(raw.phone||"").trim();
+  if (email.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw codedError_("VALIDATION_ERROR","Invalid email address.");
+  if (!/^\+[1-9]\d{6,14}$/.test(phone)) throw codedError_("VALIDATION_ERROR","Invalid international phone number.");
+  const b=Object.assign(accommodation_(raw),{schema_version:VERSION,registration_type:type,
+    booking_id:raw.booking_id,booking_date:String(raw.booking_date||""),
+    guest_name:type==="Individual"?name:"",federation_name:type==="Federation"?name:"",
+    email:email,phone:phone,passport_number:"",date_of_birth:"",nationality:"",nationality_code:""});
+  if (!isFinite(Date.parse(b.booking_date))) throw codedError_("VALIDATION_ERROR","Invalid request date.");
+  if (type==="Individual") {
+    b.passport_number=normalizePassportNumber_(raw.passport_number);
+    if (!/^[A-Z0-9]{5,20}$/.test(b.passport_number)) throw codedError_("VALIDATION_ERROR","Invalid passport number.");
+    b.date_of_birth=iso_(raw.date_of_birth);
+    if (b.date_of_birth<"1900-01-01" || Date.parse(b.date_of_birth)>Date.now()) throw codedError_("VALIDATION_ERROR","Invalid date of birth.");
+    b.nationality=String(raw.nationality||"").trim(); b.nationality_code=String(raw.nationality_code||"");
+    if (!b.nationality || !/^[A-Z]{2}$/.test(b.nationality_code)) throw codedError_("VALIDATION_ERROR","Nationality is required.");
+    if (b.room_count!==1) throw codedError_("VALIDATION_ERROR","Use Federation registration for multiple rooms.");
+  }
+  b.transport_services=transport_(raw.transport_services || []);
+  b.transport_total_eur=money_(b.transport_services.reduce((sum,r)=>sum+r.total_eur,0));
+  b.grand_total_eur=money_(b.room_total_eur+b.transport_total_eur);
+  b.transport_rate_version=TRANSPORT_RATE_VERSION;
+  if (!isFinite(Number(raw.grand_total_eur)) || Math.abs(Number(raw.grand_total_eur)-b.grand_total_eur)>0.001)
+    throw codedError_("QUOTE_CHANGED","The quote changed. Please review the current prices.");
+  b.invoice_no="INV-"+b.booking_id.replace(/^ITKF-/,"");
+  b.invoice_verification_code=verificationCode_(b);
+  b.status="Request received";
+  if (JSON.stringify(b).length>45000) throw codedError_("VALIDATION_ERROR","This request has too many service details. Split it into smaller requests.");
+  return b;
+}
+function requestHash_(b) {
+  // Only user choices; computed totals and generated PDF bytes are deliberately excluded.
+  const data={};
+  ["registration_type","guest_name","federation_name","passport_number","date_of_birth",
+   "nationality","nationality_code","phone","email","hotel","meal_plan","check_in","check_out"].forEach(k=>data[k]=b[k]||"");
+  data.rooms=(b.rooms||[]).map(r=>({room_type:r.room_type,quantity:r.quantity}));
+  data.transport_services=(b.transport_services||[]).map(r=>({
+    date:r.date,service:r.service,direction:r.direction||"",start_time:r.start_time,end_time:r.end_time,
+    ends_next_day:r.ends_next_day===true,persons:r.persons,vehicles:r.vehicles
+  }));
+  return sha_(JSON.stringify(sorted_(data)));
+}
+function sorted_(value) {
+  if (Array.isArray(value)) return value.map(sorted_);
+  if (value && typeof value==="object") {
+    const out={}; Object.keys(value).sort().forEach(k=>out[k]=sorted_(value[k])); return out;
+  }
+  return value;
+}
+function passportExists_(rows,passport) {
+  const value=normalizePassportNumber_(passport);
+  return Boolean(value) && rows.some(r=>normalizePassportNumber_(r["Passport Number"])===value);
+}
+function inventory_() {
+  const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS), index={};
+  rows_(ctx).forEach(function(r) {
+    if (!r.Hotel && !r["Room Type"]) return;
+    const date=r.Date==="*"?"*":cellDate_(r.Date);
+    const key=String(r.Hotel)+"|"+String(r["Room Type"])+"|"+date;
+    if (Object.prototype.hasOwnProperty.call(index,key)) throw codedError_("INVENTORY_CONFIG","Duplicate inventory setting. Contact the organizer.");
+    index[key]=int_(r.Capacity,"inventory capacity",100000,true);
+  });
+  return index;
+}
+function availability_(b,bookings) {
+  const index=inventory_(), dates=dates_(b.check_in,b.check_out);
+  const used={};
+  b.rooms.forEach(r=>used[r.room_type]=Object.fromEntries(dates.map(d=>[d,0])));
+  bookings.forEach(function(row) {
+    if (!row["Booking ID"] || row.Hotel!==b.hotel || ["Cancelled","Rejected"].indexOf(String(row.Status))>=0) return;
+    let rooms, start, end;
+    try {
+      start=cellDate_(row["Check-in"]); end=cellDate_(row["Check-out"]); nights_(start,end);
+      if (row["Rooms JSON"]) rooms=JSON.parse(row["Rooms JSON"]);
+      else rooms=[{room_type:row["Room Type"],quantity:row["Number of Rooms"]||1}];
+      if (!Array.isArray(rooms) || !rooms.length) throw Error("rooms");
+      rooms.forEach(function(room) {
+        if (!ROOM_OCCUPANCY[room.room_type]) throw Error("room type");
+        const qty=int_(room.quantity,"reserved rooms",100000,false);
+        if (used[room.room_type]) dates.forEach(d=>{if(d>=start && d<end) used[room.room_type][d]+=qty;});
+      });
+    } catch(e) {
+      throw codedError_("INVENTORY_REVIEW","An existing request needs inventory review. Please contact the organizer.");
+    }
+  });
+  return b.rooms.map(function(room) {
+    let remaining=Infinity;
+    dates.forEach(function(d) {
+      const base=b.hotel+"|"+room.room_type+"|", specific=base+d, fallback=base+"*";
+      const capacity=Object.prototype.hasOwnProperty.call(index,specific)?index[specific]:index[fallback];
+      if (capacity===undefined) throw codedError_("INVENTORY_CONFIG","Room availability is not configured.");
+      remaining=Math.min(remaining,Math.max(0,capacity-used[room.room_type][d]));
+    });
+    return {room_type:room.room_type,requested:room.quantity,remaining:remaining};
+  });
+}
+function createBooking_(raw,invoice) {
+  const saved=locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), rows=rows_(ctx);
+    const existing=rows.find(r=>String(r["Booking ID"])===String(raw.booking_id));
+    if (existing) {
+      if (!existing["Request Hash"] || requestHash_(raw)!==existing["Request Hash"])
+        throw codedError_("ID_CONFLICT","This request ID is already in use. Contact the organizer.");
+      if (["Cancelled","Rejected"].indexOf(String(existing.Status))>=0) throw codedError_("CANCELLED","This request is no longer active.");
+      return {booking:JSON.parse(existing["Booking JSON"]),row:existing};
+    }
+    const b=normalizeBooking_(raw);
+    if (b.registration_type==="Individual" && passportExists_(rows,b.passport_number))
+      throw codedError_("DUPLICATE_PASSPORT","This passport number is already registered.");
+    availability_(b,rows).forEach(r=>{
+      if (r.requested>r.remaining) throw codedError_("SOLD_OUT",r.room_type+": only "+r.remaining+" room(s) available for these dates.");
+    });
+    const data=bookingColumns_(b);
+    data["Request Hash"]=requestHash_(raw);
+    data["Booking JSON"]=JSON.stringify(b);
+    data["Status"]="Received"; data["Document Status"]="Pending";
+    data["Customer Email Sent"]=false;
+    // This single durable row is also the inventory reservation. No separate decrement.
+    writeRow_(ctx,0,data);
+    SpreadsheetApp.flush();
+    return {booking:b,row:data};
+  });
+  try { return processDocuments_(saved.booking,invoice); }
+  catch(err) {
+    // A document failure must never report a durable reservation as unsaved.
+    return result_(saved.row,"Request saved; documents are pending.");
   }
 }
-
-
-function codedError_(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
+function bookingColumns_(b) {
+  return {"Booking ID":b.booking_id,"Booking Date":b.booking_date,"Registration Type":b.registration_type,
+    "Guest Name":b.guest_name,"Federation Name":b.federation_name,"Date of Birth":b.date_of_birth,
+    "Passport Number":b.passport_number,"Nationality":b.nationality,"Nationality Code":b.nationality_code,
+    "Phone":b.phone,"Email":b.email,"Hotel":b.hotel,"Meal Plan":b.meal_plan,
+    "Room Type":b.rooms.map(r=>r.room_type).join(" + "),"Number of Rooms":b.room_count,"Guests":b.guests,
+    "Check-in":b.check_in,"Check-out":b.check_out,"Nights":b.nights,"Rooms JSON":JSON.stringify(b.rooms),
+    "Transportation JSON":JSON.stringify(b.transport_services),"Transportation Rate Version":b.transport_rate_version,
+    "Room Total EUR":b.room_total_eur,"Transportation Total EUR":b.transport_total_eur,"Grand Total EUR":b.grand_total_eur,
+    "Invoice No":b.invoice_no,"Invoice Verification Code":b.invoice_verification_code,"Schema Version":VERSION};
 }
-
-
-function safeError_(error) {
-  return error && error.message ? String(error.message).slice(0, 500) : "Unknown error";
+function processDocuments_(b,payload) {
+  const lease=locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), row=find_(ctx,"Booking ID",b.booking_id);
+    if (!row) throw codedError_("SERVER_ERROR","Saved request could not be located.");
+    if (row["Invoice File ID"] && truthy_(row["Customer Email Sent"])) return {done:true,row:row};
+    const started=Date.parse(String(row["Processing Started"]||""));
+    if (row["Document Status"]==="Processing" && started && Date.now()-started<10*60*1000)
+      return {done:true,row:row};
+    writeRow_(ctx,row._row,{"Document Status":"Processing","Processing Started":new Date().toISOString()},row);
+    SpreadsheetApp.flush(); return {done:false,row:row};
+  });
+  if (lease.done) {
+    // Repair the secondary invoice log if a prior execution stopped after email.
+    if (lease.row["Document Status"]!=="Processing") {
+      try { locked_(function() { invoiceLog_(b,lease.row); }); } catch(e) { /* Main row remains saved. */ }
+    }
+    return result_(lease.row);
+  }
+  let row=lease.row, errors=[];
+  try {
+    if (!row["Invoice File ID"]) {
+      const file=saveInvoicePdf_(payload,b);
+      row=updateBooking_(b.booking_id,{"Invoice File ID":file.id,"Invoice URL":file.url,"Invoice SHA-256":file.sha256});
+    }
+    if (!truthy_(row["Customer Email Sent"])) {
+      if (MailApp.getRemainingDailyQuota()<1) throw Error("Daily email quota reached; delivery will be retried.");
+      const name=b.federation_name || b.guest_name;
+      MailApp.sendEmail({
+        to:b.email,subject:b.invoice_no+" - ITKF Booking Request",
+        body:"Dear "+name+",\n\nYour booking request has been received successfully.\nRequest ID: "+b.booking_id+
+          "\nSummary / invoice: "+b.invoice_no+"\nTotal: EUR "+b.grand_total_eur.toFixed(2)+
+          "\n\nYour PDF is attached.",
+        name:optionalProp_("COMPANY_NAME") || "Egyptian Traditional Karate Federation",
+        attachments:[DriveApp.getFileById(row["Invoice File ID"]).getBlob().setName(b.invoice_no+".pdf")]
+      });
+      row=updateBooking_(b.booking_id,{"Customer Email Sent":true,"Email Sent At":new Date().toISOString()});
+    }
+  } catch(e) { errors.push(safeError_(e)); }
+  row=updateBooking_(b.booking_id,{"Document Status":errors.length?"Pending":"Ready","Processing Started":"","Last Error":errors.join(" | ")});
+  try { locked_(function() { invoiceLog_(b,row); }); } catch(e) { /* Booking row remains the authoritative record. */ }
+  return result_(row);
 }
-
-
-function escapeHtml_(value) {
-  return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#039;");
+function saveInvoicePdf_(payload,b) {
+  const folder=DriveApp.getFolderById(optionalProp_("INVOICE_FOLDER_ID") || prop_("DRIVE_FOLDER_ID"));
+  // Recover a file written immediately before a prior execution timed out.
+  const matches=folder.getFilesByName(b.invoice_no+".pdf");
+  if (matches.hasNext()) {
+    const file=matches.next();
+    return {id:file.getId(),url:file.getUrl(),sha256:digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,file.getBlob().getBytes()))};
+  }
+  if (!payload.base64 || payload.mime_type!=="application/pdf" || payload.filename!==b.invoice_no+".pdf")
+    throw Error("PDF generation is pending. Retry PDF from the application.");
+  if (!equal_(payload.verification_code,b.invoice_verification_code)) throw Error("PDF verification does not match this request.");
+  const bytes=Utilities.base64Decode(payload.base64);
+  const magic=bytes.slice(0,5).map(v=>String.fromCharCode((v+256)%256)).join("");
+  if (!bytes.length || bytes.length>5*1024*1024 || magic!=="%PDF-") throw Error("Invalid PDF.");
+  const digest=digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes));
+  if (!equal_(digest,payload.sha256)) throw Error("PDF integrity check failed.");
+  const file=folder.createFile(Utilities.newBlob(bytes,"application/pdf",b.invoice_no+".pdf"));
+  return {id:file.getId(),url:file.getUrl(),sha256:digest};
 }
-
-
-function json_(object) {
-  return ContentService.createTextOutput(JSON.stringify(object))
-    .setMimeType(ContentService.MimeType.JSON);
+function updateBooking_(id,changes) {
+  return locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), row=find_(ctx,"Booking ID",id);
+    if (!row) throw Error("Request row is missing.");
+    writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush();
+    return Object.assign(row,changes);
+  });
 }
-
-
+function invoiceLog_(b,row) {
+  const ctx=ensureSheet_(INVOICES_SHEET,INVOICE_HEADERS), old=find_(ctx,"Invoice No",b.invoice_no);
+  const data={"Invoice No":b.invoice_no,"Booking ID":b.booking_id,"Created At":b.booking_date,
+    "Customer Name":b.federation_name||b.guest_name,"Customer Email":b.email,"Grand Total EUR":b.grand_total_eur,
+    "Invoice File ID":row["Invoice File ID"]||"","Invoice URL":row["Invoice URL"]||"",
+    "Invoice Verification Code":b.invoice_verification_code,"Invoice SHA-256":row["Invoice SHA-256"]||"",
+    "Email Status":truthy_(row["Customer Email Sent"])?"Sent":"Pending","Last Error":row["Last Error"]||""};
+  writeRow_(ctx,old?old._row:0,data,old);
+}
+function result_(row,message) {
+  const out={ok:true,saved:true,booking_id:String(row["Booking ID"]),status:"Request received",
+    invoice_no:row["Invoice No"],invoice_verification_code:row["Invoice Verification Code"],
+    invoice_created:Boolean(row["Invoice File ID"]),invoice_url:row["Invoice URL"]||"",
+    invoice_sha256:row["Invoice SHA-256"]||"",customer_email_sent:truthy_(row["Customer Email Sent"]),
+    document_status:row["Document Status"],message:message||"Your request has been received successfully."};
+  if (row["Invoice File ID"]) {
+    try { out.invoice_base64=Utilities.base64Encode(DriveApp.getFileById(row["Invoice File ID"]).getBlob().getBytes()); }
+    catch(e) { out.invoice_read_error="The PDF copy could not be retrieved."; }
+  }
+  return out;
+}
+function ensureSheet_(name,required) {
+  const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
+  const sheet=ss.getSheetByName(name)||ss.insertSheet(name);
+  let headers=sheet.getLastColumn()?sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0].map(String):[];
+  const originalLength=headers.length;
+  required.forEach(h=>{if(headers.indexOf(h)<0) headers.push(h);});
+  if (sheet.getMaxColumns()<headers.length) sheet.insertColumnsAfter(sheet.getMaxColumns(),headers.length-sheet.getMaxColumns());
+  if (headers.length!==originalLength) {
+    sheet.getRange(1,1,1,headers.length).setValues([headers]);
+    sheet.getRange(1,1,1,headers.length).setFontWeight("bold").setBackground("#C8102E").setFontColor("#FFFFFF");
+    sheet.setFrozenRows(1);
+  }
+  return {sheet:sheet,headers:headers};
+}
+function rows_(ctx) {
+  if (ctx.sheet.getLastRow()<2) return [];
+  return ctx.sheet.getRange(2,1,ctx.sheet.getLastRow()-1,ctx.headers.length).getValues().map(function(values,index) {
+    const row={_row:index+2}; ctx.headers.forEach((h,i)=>row[h]=values[i]); return row;
+  });
+}
+function find_(ctx,header,value) { return rows_(ctx).find(r=>String(r[header])===String(value)); }
+function writeRow_(ctx,row,data,old) {
+  row=row||ctx.sheet.getLastRow()+1;
+  if (row>ctx.sheet.getMaxRows()) ctx.sheet.insertRowsAfter(ctx.sheet.getMaxRows(),row-ctx.sheet.getMaxRows());
+  const values=ctx.headers.map(h=>Object.prototype.hasOwnProperty.call(data,h)?data[h]:(old && old[h]!==undefined?old[h]:""));
+  const range=ctx.sheet.getRange(row,1,1,ctx.headers.length);
+  // Prevent formula injection and preserve passport/phone leading zeros BEFORE writing.
+  range.setNumberFormat("@");
+  range.setValues([values.map(v=>typeof v==="string" && /^[=+@\-]/.test(v)?"'"+v:v)]);
+  return row;
+}
+function cellDate_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v,SpreadsheetApp.openById(prop_("SPREADSHEET_ID")).getSpreadsheetTimeZone(),"yyyy-MM-dd");
+  return iso_(String(v));
+}
 function setupSheetsNow() {
-  ensureSheet_(BOOKINGS_SHEET, BOOKING_HEADERS);
-  ensureSheet_(INVOICES_SHEET, INVOICE_HEADERS);
+  locked_(function() {
+    ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS);
+    ensureSheet_(INVOICES_SHEET,INVOICE_HEADERS);
+    const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS), rows=rows_(ctx);
+    Object.keys(HOTEL_RATES_EUR).forEach(function(hotel) {
+      const rooms={}; Object.values(HOTEL_RATES_EUR[hotel]).forEach(plan=>Object.keys(plan).forEach(room=>rooms[room]=true));
+      Object.keys(rooms).forEach(function(room) {
+        if (!rows.some(r=>r.Hotel===hotel && r["Room Type"]===room && r.Date==="*"))
+          writeRow_(ctx,0,{"Hotel":hotel,"Room Type":room,"Date":"*","Capacity":10});
+      });
+    });
+    SpreadsheetApp.flush();
+  });
+  console.log("Setup complete. Existing data and existing capacities were preserved.");
 }
+function diagnoseBackend() {
+  prop_("BOOKING_API_TOKEN");
+  const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
+  DriveApp.getFolderById(optionalProp_("INVOICE_FOLDER_ID") || prop_("DRIVE_FOLDER_ID")).getName();
+  console.log(JSON.stringify({version:VERSION,bookings_sheet_exists:Boolean(ss.getSheetByName(BOOKINGS_SHEET)),
+    inventory_sheet_exists:Boolean(ss.getSheetByName(INVENTORY_SHEET)),email_quota_remaining:MailApp.getRemainingDailyQuota()}));
+}
+function retryPendingEmails() {
+  const pending=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)).filter(r=>r["Booking JSON"] &&
+    r["Invoice File ID"] && ["Cancelled","Rejected"].indexOf(String(r.Status))<0 &&
+    !truthy_(r["Customer Email Sent"])).slice(0,20);
+  for (const row of pending) {
+    if (MailApp.getRemainingDailyQuota()<1) break;
+    try { processDocuments_(JSON.parse(row["Booking JSON"]),{}); } catch(e) { /* Retry on next trigger. */ }
+  }
+}
+function installRetryTrigger() {
+  if (!ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==="retryPendingEmails"))
+    ScriptApp.newTrigger("retryPendingEmails").timeBased().everyMinutes(5).create();
+}
+function verificationCode_(b) {
+  const message=[b.invoice_no,b.booking_id,b.email,Number(b.grand_total_eur).toFixed(2)].join("\n");
+  return digestHex_(Utilities.computeHmacSha256Signature(message,prop_("BOOKING_API_TOKEN"),Utilities.Charset.UTF_8))
+    .toUpperCase().slice(0,16).match(/.{4}/g).join("-");
+}
+function sha_(value) { return digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,value,Utilities.Charset.UTF_8)); }
+function digestHex_(bytes) { return bytes.map(v=>((Number(v)+256)%256).toString(16).padStart(2,"0")).join(""); }
+function equal_(a,b) {
+  a=String(a||""); b=String(b||""); let diff=a.length^b.length;
+  for(let i=0;i<Math.max(a.length,b.length);i++) diff|=(a.charCodeAt(i)||0)^(b.charCodeAt(i)||0);
+  return diff===0;
+}
+function money_(v) { return Math.round((Number(v)+Number.EPSILON)*100)/100; }
+function truthy_(v) { return v===true || String(v).toLowerCase()==="true"; }
+function optionalProp_(name) { return PropertiesService.getScriptProperties().getProperty(name)||""; }
+function prop_(name) { const v=optionalProp_(name); if(!v) throw codedError_("MISSING_PROPERTY","Missing Script Property: "+name); return v; }
+function codedError_(code,msg) { const err=Error(msg); err.code=code; return err; }
+function safeError_(err) { return String(err && err.message || "Service error.").slice(0,300); }
+function json_(obj) { return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON); }

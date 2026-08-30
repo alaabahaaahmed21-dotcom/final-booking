@@ -35,13 +35,8 @@ BORDER_COLOR = "#C8102E"
 # Currency
 # ---------------------------------------------------------------------------
 
-# EUR is the only base currency.  The current working conversion agreed for
-# the application is 1 EUR = 56 EGP and 1 USD = 49.50 EGP.  Change these two
-# values only when the organizer publishes a new booking exchange rate.
-CURRENCY_RATES = {
-    "EUR_TO_USD": 56.0 / 49.5,
-    "EUR_TO_EGP": 56.0,
-}
+# All new requests and invoices use EUR only.
+CURRENCY = "EUR"
 
 
 # ---------------------------------------------------------------------------
@@ -161,142 +156,35 @@ ROOM_OCCUPANCY = {
 
 
 # ---------------------------------------------------------------------------
-# Transportation
+# Transportation - final approved quotation. EUR per complete vehicle.
+# Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
+# All prices include 14% VAT: never add it a second time.
 # ---------------------------------------------------------------------------
-
-# EUR is the transportation base currency too.  The Limousine values are for
-# one complete vehicle.  Every bus value is a preliminary EUR/person rate
-# derived from the supplier quotation and the stated vehicle capacity.
-TRANSPORT_RATE_VERSION = "2026-08-27 quotation - EUR preliminary rates"
-
+APP_SCHEMA_VERSION = "2026-08-30-v2"
+TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
-    "One-way Transfer - Airport to Stadium or Hotel": (
-        "One-way Transfer - Airport to Stadium or Hotel"
-    ),
-    "Full Day Within Cairo": "Full Day Within Cairo",
-    "Evening Service": "Evening Service",
+    "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,
+                         "directions": ("Airport to Hotel", "Hotel to Airport")},
+    "Stadium Transfer": {"label": "Hotel / Stadium - One-way Transfer", "max_hours": None,
+                         "directions": ("Hotel to Stadium", "Stadium to Hotel")},
+    "Daily 8 Hours": {"label": "Daily Hire - Up to 8 Hours", "max_hours": 8, "directions": ()},
+    "Daily 12 Hours": {"label": "Daily Hire - Up to 12 Hours", "max_hours": 12, "directions": ()},
 }
-
-TRANSPORT_PRICING_LABELS = {
-    "per_vehicle": "Full Vehicle",
-    "per_person": "Per Person",
-}
-
 TRANSPORTATION = {
-    "Limousine": {
-        "pricing_modes": ("per_vehicle",),
-        "prices_eur": {
-            "One-way Transfer - Airport to Stadium or Hotel": 23.214286,
-            "Full Day Within Cairo": 80.357143,
-            "Evening Service": 32.142857,
-        },
-    },
-    "Hiace (15 Seats)": {
-        "capacity": 15,
-        "pricing_modes": ("per_person",),
-        "prices_eur": {
-            "One-way Transfer - Airport to Stadium or Hotel": 2.500000,
-            "Full Day Within Cairo": 6.666667,
-            "Evening Service": 2.976190,
-        },
-    },
-    "Coaster (30 Seats)": {
-        "capacity": 30,
-        "pricing_modes": ("per_person",),
-        "prices_eur": {
-            "One-way Transfer - Airport to Stadium or Hotel": 1.815476,
-            "Full Day Within Cairo": 3.690476,
-            "Evening Service": 1.785714,
-        },
-    },
-    "33-Seat Bus": {
-        "capacity": 33,
-        "pricing_modes": ("per_person",),
-        "prices_eur": {
-            "One-way Transfer - Airport to Stadium or Hotel": 1.948052,
-            "Full Day Within Cairo": 4.112554,
-            "Evening Service": 1.893939,
-        },
-    },
-    "50-Seat Bus": {
-        "capacity": 50,
-        "pricing_modes": ("per_person",),
-        "prices_eur": {
-            "One-way Transfer - Airport to Stadium or Hotel": 2.321429,
-            "Full Day Within Cairo": 4.714286,
-            "Evening Service": 1.892857,
-        },
-    },
+    "Limousine (3 Seats)": {"capacity": 3, "prices_eur": {
+        "Airport Transfer": 30, "Stadium Transfer": 30, "Daily 8 Hours": 110, "Daily 12 Hours": 145}},
+    "H1 / Van (7 Seats)": {"capacity": 7, "prices_eur": {
+        "Airport Transfer": 50, "Stadium Transfer": 50, "Daily 8 Hours": 150, "Daily 12 Hours": 170}},
+    "Toyota Hiace (10 Seats)": {"capacity": 10, "prices_eur": {
+        "Airport Transfer": 60, "Stadium Transfer": 60, "Daily 8 Hours": 160, "Daily 12 Hours": 200}},
+    "Coaster (26 Seats)": {"capacity": 26, "prices_eur": {
+        "Airport Transfer": 100, "Stadium Transfer": 100, "Daily 8 Hours": 200, "Daily 12 Hours": 240}},
+    "Bus (50 Seats)": {"capacity": 50, "prices_eur": {
+        "Airport Transfer": 190, "Stadium Transfer": 190, "Daily 8 Hours": 300, "Daily 12 Hours": 400}},
 }
-
-
-# ---------------------------------------------------------------------------
-# Upload and booking rules
-# ---------------------------------------------------------------------------
-
-MAX_IMAGE_SIZE_MB = 8
-MAX_IMAGE_PIXELS = 30_000_000
-PERSONAL_PHOTO_TARGET_MB = 0.4
-PERSONAL_PHOTO_MAX_DIMENSION = 1200
-PASSPORT_PHOTO_TARGET_MB = 0.8
-PASSPORT_PHOTO_MAX_DIMENSION = 1800
-REQUIRE_PERSONAL_PHOTO = False
-REQUIRE_PASSPORT_PHOTO = True
 MAX_BOOKING_NIGHTS = 60
+MAX_TRANSPORT_SERVICES = 60
 DEFAULT_COUNTRY_CODE = "EG"
-
-
-# ---------------------------------------------------------------------------
-# Google Sheet columns used by the Apps Script backend
-# ---------------------------------------------------------------------------
-
-SHEET_COLUMNS = [
-    "Booking ID",
-    "Booking Date",
-    "Guest Name",
-    "Date of Birth",
-    "Passport Number",
-    "Nationality",
-    "Nationality Code",
-    "Phone Country Code",
-    "Phone",
-    "Email",
-    "Personal Photo File ID",
-    "Personal Photo URL",
-    "Passport Photo File ID",
-    "Passport Photo URL",
-    "Hotel",
-    "Meal Plan",
-    "Room Type",
-    "Guests",
-    "Check-in",
-    "Check-out",
-    "Nights",
-    "Nightly Rate EUR",
-    "Vehicle Type",
-    "Transportation Service",
-    "Transportation Pricing Mode",
-    "Transportation Persons",
-    "Transportation Vehicle Count",
-    "Transportation Billed Units",
-    "Transportation Unit Price EGP",
-    "Transportation Unit Price EUR",
-    "Transportation Rate Version",
-    "Transportation Price Per Person EUR",
-    "Room Total EUR",
-    "Transportation Total EUR",
-    "Transportation Total EGP",
-    "Grand Total EUR",
-    "Grand Total USD",
-    "Grand Total EGP",
-    "Invoice No",
-    "Invoice File ID",
-    "Invoice URL",
-    "Invoice Verification Code",
-    "Invoice SHA-256",
-    "Customer Email Sent",
-    "Email Sent At",
-    "Processing Started",
-    "Status",
-    "Last Error",
-]
+# Initial INTERNAL request allocation per room type per night.
+# Backend Inventory sheet is authoritative once setupSheetsNow has run.
+DEFAULT_ROOM_ALLOTMENT = 10

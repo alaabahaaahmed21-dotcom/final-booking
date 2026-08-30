@@ -5,42 +5,20 @@ from __future__ import annotations
 import base64
 import html
 import mimetypes
-from datetime import date, timedelta
+from datetime import date, timedelta, time as dt_time
+import uuid
 from typing import Any
 
 import streamlit as st
 
-from config import (
-    BORDER_COLOR,
-    DEFAULT_COUNTRY_CODE,
-    EVENT_TITLE,
-    HEADER_BG_COLOR,
-    HOTELS,
-    LOGO_PATHS,
-    MAX_BOOKING_NIGHTS,
-    MAX_IMAGE_SIZE_MB,
-    REQUIRE_PASSPORT_PHOTO,
-    REQUIRE_PERSONAL_PHOTO,
-    ROOM_OCCUPANCY,
-    SYSTEM_TITLE,
-    TRANSPORT_PRICING_LABELS,
-    TRANSPORT_SERVICES,
-    TRANSPORTATION,
-)
+from config import (BORDER_COLOR, DEFAULT_COUNTRY_CODE, EVENT_TITLE, HEADER_BG_COLOR,
+    HOTELS, LOGO_PATHS, ROOM_OCCUPANCY, SYSTEM_TITLE, TRANSPORT_SERVICES, TRANSPORTATION,
+    APP_SCHEMA_VERSION, MAX_TRANSPORT_SERVICES)
 from countries import countries, countries_by_name, country_for_code, validate_phone
-from helpers import (
-    calculate_booking_totals,
-    calculate_nights,
-    current_timestamp,
-    format_currency,
-    generate_booking_id,
-    normalize_guest_name,
-    normalize_passport_number,
-    validate_booking,
-)
-from pdf_generator import generate_pdf
-from sheets import backend_is_configured, save_to_google_sheets
-from uploads import validate_uploaded_image
+from helpers import (calculate_booking_totals, generate_booking_id, current_timestamp,
+    normalize_guest_name, normalize_passport_number, validate_booking, format_currency,
+    price_transport_service, vehicle_suggestions)
+from sheets import backend_is_configured, save_to_google_sheets, check_availability
 
 
 st.set_page_config(
@@ -455,838 +433,364 @@ def section_title(icon: str, title: str, help_text: str = "") -> None:
         )
 
 
-def _first_hotel_defaults() -> tuple[str, str, str]:
+def first_choices():
     hotel = next(iter(HOTELS))
-    meal = next(iter(HOTELS[hotel]["rates"]))
-    room = next(iter(HOTELS[hotel]["rates"][meal]))
-    return hotel, meal, room
+    plan = next(iter(HOTELS[hotel]["rates"]))
+    return hotel, plan, next(iter(HOTELS[hotel]["rates"][plan]))
 
-
-DEFAULT_HOTEL, DEFAULT_MEAL, DEFAULT_ROOM = _first_hotel_defaults()
+DEFAULT_HOTEL, DEFAULT_MEAL, DEFAULT_ROOM = first_choices()
 DEFAULT_COUNTRY = country_for_code(DEFAULT_COUNTRY_CODE)
-DEFAULT_VEHICLE = next(iter(TRANSPORTATION)) if TRANSPORTATION else None
-DEFAULT_TRANSPORT_SERVICE = next(iter(TRANSPORT_SERVICES)) if TRANSPORT_SERVICES else None
-DEFAULT_TRANSPORT_MODE = (
-    TRANSPORTATION[DEFAULT_VEHICLE]["pricing_modes"][0] if DEFAULT_VEHICLE else None
-)
 DEFAULTS = {
-    "current_page": "Personal",
-    "guest_name": "",
-    "date_of_birth": None,
-    "passport_number": "",
+    "current_page": "Personal", "registration_type": "Individual",
+    "guest_name": "", "date_of_birth": None, "passport_number": "",
     "nationality": DEFAULT_COUNTRY.name,
-    "nationality_code": DEFAULT_COUNTRY.iso2,
-    "phone_country_code": DEFAULT_COUNTRY.calling_code,
-    "phone_national": "",
-    "phone": "",
-    "phone_valid": False,
-    "email": "",
-    "personal_photo": None,
-    "passport_photo": None,
-    "hotel": DEFAULT_HOTEL,
-    "_hotel_context": DEFAULT_HOTEL,
-    "meal_plan": DEFAULT_MEAL,
-    "room_type": DEFAULT_ROOM,
-    "guests": 1,
-    "check_in": date.today(),
-    "check_out": date.today() + timedelta(days=1),
-    "wants_transportation": False,
-    "vehicle_type": DEFAULT_VEHICLE,
-    "transport_service": DEFAULT_TRANSPORT_SERVICE,
-    "transport_pricing_mode": DEFAULT_TRANSPORT_MODE,
-    "transport_persons": 1,
-    "transport_vehicle_count": 1,
-    "booking_submitted": False,
-    "last_booking": None,
-    "pending_submission": None,
-    "pending_error": "",
+    "individual_phone": DEFAULT_COUNTRY.calling_code, "individual_email": "",
+    "federation_name": "", "federation_phone": "+", "federation_email": "",
+    "hotel": DEFAULT_HOTEL, "meal_plan": DEFAULT_MEAL, "room_type": DEFAULT_ROOM,
+    "check_in": date.today(), "check_out": date.today() + timedelta(days=1),
+    "wants_transportation": False, "transport_ids": [],
+    "last_booking": None, "pending_submission": None, "pending_error": "",
 }
-
-for state_key, default_value in DEFAULTS.items():
-    if state_key not in st.session_state:
-        st.session_state[state_key] = default_value
-
-
-# Streamlit normally removes the value of a widget when that widget is not
-# rendered on the current run. This application is a multi-step wizard, so
-# keep every form value independent from the page that is currently visible.
-# Assigning an existing key to itself interrupts Streamlit's widget cleanup.
-PERSISTENT_FORM_KEYS = (
-    "guest_name",
-    "date_of_birth",
-    "passport_number",
-    "nationality",
-    "phone_national",
-    "email",
-    "hotel",
-    "meal_plan",
-    "room_type",
-    "guests",
-    "check_in",
-    "check_out",
-    "wants_transportation",
-    "transport_service",
-    "vehicle_type",
-    "transport_pricing_mode",
-    "transport_persons",
-    "transport_vehicle_count",
-)
-for state_key in PERSISTENT_FORM_KEYS:
-    if state_key in st.session_state:
-        st.session_state[state_key] = st.session_state[state_key]
-
+for key, value in DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+# Keep widget values across wizard pages and dynamic sections.
+for key in list(st.session_state):
+    if key in DEFAULTS or (key.startswith(("rq_", "tr_")) and not key.endswith("_remove")):
+        st.session_state[key] = st.session_state[key]
 
 PAGES = ["Personal", "Hotel", "Transportation", "Review", "Complete"]
-PAGE_LABELS = {
-    "Personal": "Personal",
-    "Hotel": "Hotel",
-    "Transportation": "Transport",
-    "Review": "Review",
-    "Complete": "Complete",
-}
-
-
-def go_to(page: str) -> None:
+def go_to(page):
     st.session_state.current_page = page
 
+def render_navigation():
+    for col, page in zip(st.columns(len(PAGES)), PAGES):
+        with col:
+            st.button("Transport" if page == "Transportation" else page,
+                      key="nav_" + page, use_container_width=True,
+                      type="primary" if page == st.session_state.current_page else "secondary",
+                      on_click=go_to, args=(page,))
 
-def render_navigation() -> None:
-    columns = st.columns(len(PAGES))
-    for column, page_name in zip(columns, PAGES):
-        with column:
-            st.button(
-                PAGE_LABELS[page_name],
-                key=f"nav_{page_name}",
-                use_container_width=True,
-                type="primary" if st.session_state.current_page == page_name else "secondary",
-                on_click=go_to,
-                args=(page_name,),
-            )
+def render_step_navigation(back=None, next_page=None):
+    st.write("")
+    left, right = st.columns(2)
+    if back:
+        left.button("← Back", key="back_" + st.session_state.current_page,
+                    use_container_width=True, on_click=go_to, args=(back,))
+    if next_page:
+        right.button("Next →", key="next_" + st.session_state.current_page,
+                     type="primary", use_container_width=True, on_click=go_to, args=(next_page,))
 
+def normalize_hotel_state():
+    state = st.session_state
+    if state.hotel not in HOTELS:
+        state.hotel = DEFAULT_HOTEL
+    plans = HOTELS[state.hotel]["rates"]
+    if state.meal_plan not in plans:
+        state.meal_plan = next(iter(plans))
+    if state.room_type not in plans[state.meal_plan]:
+        state.room_type = next(iter(plans[state.meal_plan]))
+    for room in plans[state.meal_plan]:
+        key = room_key(room)
+        if key not in state:
+            state[key] = 1 if room == next(iter(plans[state.meal_plan])) else 0
 
-def render_step_navigation(
-    back_page: str | None = None,
-    next_page: str | None = None,
-    next_label: str = "Next",
-) -> None:
-    """Render clear Back/Next controls without discarding form state."""
+def room_key(room):
+    return "rq_" + st.session_state.hotel + "_" + room
 
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-    back_column, next_column = st.columns(2)
-    with back_column:
-        if back_page:
-            st.button(
-                "← Back",
-                key=f"step_back_{st.session_state.current_page}",
-                use_container_width=True,
-                on_click=go_to,
-                args=(back_page,),
-            )
-    with next_column:
-        if next_page:
-            st.button(
-                f"{next_label} →",
-                key=f"step_next_{st.session_state.current_page}",
-                type="primary",
-                use_container_width=True,
-                on_click=go_to,
-                args=(next_page,),
-            )
-
-
-def _normalize_hotel_state() -> None:
-    hotel = st.session_state.get("hotel")
-    if hotel not in HOTELS:
-        st.session_state.hotel = DEFAULT_HOTEL
-        hotel = DEFAULT_HOTEL
-
-    if st.session_state.get("_hotel_context") != hotel:
-        meal = next(iter(HOTELS[hotel]["rates"]))
-        room = next(iter(HOTELS[hotel]["rates"][meal]))
-        st.session_state.meal_plan = meal
-        st.session_state.room_type = room
-        st.session_state.guests = 1
-        st.session_state._hotel_context = hotel
-
-    plans = HOTELS[hotel]["rates"]
-    if st.session_state.get("meal_plan") not in plans:
-        st.session_state.meal_plan = next(iter(plans))
-    rooms = plans[st.session_state.meal_plan]
-    if st.session_state.get("room_type") not in rooms:
-        st.session_state.room_type = next(iter(rooms))
-    expected_guests = ROOM_OCCUPANCY.get(st.session_state.room_type, 1)
-    if int(st.session_state.get("guests", 0)) != expected_guests:
-        st.session_state.guests = expected_guests
-
-
-def _sync_guests_to_room() -> None:
-    """Set the exact guest count represented by the selected room type."""
-
-    st.session_state.guests = ROOM_OCCUPANCY.get(
-        st.session_state.get("room_type", DEFAULT_ROOM), 1
-    )
-
-
-def _normalize_transport_state() -> None:
-    vehicle = st.session_state.get("vehicle_type")
-    if vehicle not in TRANSPORTATION:
-        st.session_state.vehicle_type = DEFAULT_VEHICLE
-        vehicle = DEFAULT_VEHICLE
-    if st.session_state.get("transport_service") not in TRANSPORT_SERVICES:
-        st.session_state.transport_service = DEFAULT_TRANSPORT_SERVICE
-    modes = TRANSPORTATION.get(vehicle, {}).get("pricing_modes", ())
-    if st.session_state.get("transport_pricing_mode") not in modes:
-        st.session_state.transport_pricing_mode = modes[0] if modes else None
-    try:
-        if int(st.session_state.get("transport_persons", 0)) < 1:
-            st.session_state.transport_persons = 1
-    except (TypeError, ValueError):
-        st.session_state.transport_persons = 1
-    try:
-        if int(st.session_state.get("transport_vehicle_count", 0)) < 1:
-            st.session_state.transport_vehicle_count = 1
-    except (TypeError, ValueError):
-        st.session_state.transport_vehicle_count = 1
-
-
-def _ensure_checkout() -> None:
+def ensure_checkout():
     if st.session_state.check_out <= st.session_state.check_in:
         st.session_state.check_out = st.session_state.check_in + timedelta(days=1)
 
+def sync_country():
+    country = countries_by_name()[st.session_state.nationality]
+    old_prefix = st.session_state.get("last_phone_prefix", DEFAULT_COUNTRY.calling_code)
+    if st.session_state.individual_phone.strip() in ("", "+", old_prefix):
+        st.session_state.individual_phone = country.calling_code
+    st.session_state.last_phone_prefix = country.calling_code
 
-def _sync_country() -> None:
-    country = countries_by_name().get(st.session_state.get("nationality"))
-    if country is None:
-        country = DEFAULT_COUNTRY
-        st.session_state.nationality = country.name
-    st.session_state.nationality_code = country.iso2
-    st.session_state.phone_country_code = country.calling_code
+def normalize_name():
+    st.session_state.guest_name = normalize_guest_name(st.session_state.guest_name)
 
+def normalize_passport():
+    st.session_state.passport_number = normalize_passport_number(st.session_state.passport_number)
 
-def _normalize_guest_name_state() -> None:
-    st.session_state.guest_name = normalize_guest_name(st.session_state.get("guest_name"))
+def selected_rooms():
+    normalize_hotel_state()
+    if st.session_state.registration_type == "Individual":
+        return [{"room_type": st.session_state.room_type, "quantity": 1}]
+    return [{"room_type": room, "quantity": int(st.session_state[room_key(room)])}
+            for room in HOTELS[st.session_state.hotel]["rates"][st.session_state.meal_plan]
+            if st.session_state[room_key(room)] > 0]
 
+def add_transport():
+    if len(st.session_state.transport_ids) >= MAX_TRANSPORT_SERVICES:
+        return
+    ident = uuid.uuid4().hex[:10]
+    st.session_state.transport_ids = st.session_state.transport_ids + [ident]
+    defaults = {"date": st.session_state.check_in, "service": next(iter(TRANSPORT_SERVICES)),
+                "direction": "Airport to Hotel", "start": dt_time(9, 0), "end": dt_time(10, 0),
+                "next_day": False,
+                "persons": max(1, sum(r["quantity"] * ROOM_OCCUPANCY[r["room_type"]] for r in selected_rooms()))}
+    for name, value in defaults.items():
+        st.session_state[f"tr_{ident}_{name}"] = value
+    for index in range(len(TRANSPORTATION)):
+        st.session_state[f"tr_{ident}_v{index}"] = 0
 
-def _normalize_passport_state() -> None:
-    st.session_state.passport_number = normalize_passport_number(
-        st.session_state.get("passport_number")
-    )
-    if not st.session_state.get("pending_submission"):
-        st.session_state.pending_error = ""
+def remove_transport(ident):
+    st.session_state.transport_ids = [item for item in st.session_state.transport_ids if item != ident]
 
+def transport_from_state():
+    if not st.session_state.wants_transportation:
+        return []
+    items = []
+    for ident in st.session_state.transport_ids:
+        key = lambda name: st.session_state[f"tr_{ident}_{name}"]
+        items.append({"date": key("date").isoformat(), "service": key("service"),
+                      "direction": key("direction") if TRANSPORT_SERVICES[key("service")]["directions"] else "",
+                      "start_time": key("start").strftime("%H:%M"), "end_time": key("end").strftime("%H:%M"),
+                      "ends_next_day": key("next_day"), "persons": key("persons"),
+                      "vehicles": {name: key(f"v{i}") for i, name in enumerate(TRANSPORTATION) if key(f"v{i}") > 0}})
+    return items
 
-def current_nights() -> int:
-    try:
-        return calculate_nights(st.session_state.check_in, st.session_state.check_out)
-    except (AttributeError, TypeError):
-        return 0
+def booking_from_state():
+    state = st.session_state
+    normalize_hotel_state()
+    individual = state.registration_type == "Individual"
+    country = countries_by_name()[state.nationality]
+    phone_input = state.individual_phone if individual else state.federation_phone
+    valid, phone, _ = validate_phone(country.iso2 if individual else "EG", phone_input)
+    if not individual and not phone_input.strip().startswith("+"):
+        valid = False
+    raw = {"schema_version": APP_SCHEMA_VERSION, "registration_type": state.registration_type,
+           "guest_name": normalize_guest_name(state.guest_name) if individual else "",
+           "federation_name": state.federation_name.strip() if not individual else "",
+           "passport_number": normalize_passport_number(state.passport_number) if individual else "",
+           "date_of_birth": state.date_of_birth.isoformat() if individual and state.date_of_birth else "",
+           "nationality": country.name if individual else "", "nationality_code": country.iso2 if individual else "",
+           "phone": phone if valid else "", "phone_valid": valid,
+           "email": (state.individual_email if individual else state.federation_email).strip(),
+           "hotel": state.hotel, "meal_plan": state.meal_plan, "rooms": selected_rooms(),
+           "check_in": state.check_in.isoformat(), "check_out": state.check_out.isoformat(),
+           "transport_services": transport_from_state()}
+    return raw
 
-
-def current_totals() -> dict[str, float | int | str | bool | None]:
-    _normalize_hotel_state()
-    _normalize_transport_state()
-    return calculate_booking_totals(
-        st.session_state.hotel,
-        st.session_state.meal_plan,
-        st.session_state.room_type,
-        current_nights(),
-        bool(st.session_state.wants_transportation),
-        st.session_state.vehicle_type,
-        int(st.session_state.transport_persons),
-        st.session_state.transport_service,
-        st.session_state.transport_pricing_mode,
-        int(st.session_state.transport_vehicle_count),
-    )
-
-
-def render_price_box(totals: dict[str, float | int | str | bool | None]) -> None:
-    if totals.get("transport_price_pending"):
-        transport_line = "<b>Transportation:</b> Price pending"
-    elif totals.get("transport_pricing_label") == "Not requested":
-        transport_line = "<b>Transportation:</b> Not requested"
-    else:
-        unit_price_eur = totals.get("transport_unit_price_eur") or 0.0
-        unit_price_egp = totals.get("transport_unit_price_egp") or 0.0
-        pricing_label = html.escape(str(totals.get("transport_pricing_label") or ""))
-        billed_units = int(totals.get("transport_billed_units") or 0)
-        transport_line = (
-            f"<b>Transportation:</b> {format_currency(float(totals['transport_total_eur']), 'EUR')} "
-            f"/ {format_currency(float(totals['transport_total_egp']), 'EGP')}<br>"
-            f"<small>{pricing_label}: {format_currency(float(unit_price_eur), 'EUR')} "
-            f"/ {format_currency(float(unit_price_egp), 'EGP')} × {billed_units}</small>"
-        )
+def render_price_box(totals):
     st.markdown(
-        f"""
-        <div class="itkf-price-box">
-          <b>Room total:</b> {format_currency(float(totals['room_total_eur']), 'EUR')}<br>
-          {transport_line}
-          <hr style="margin:8px 0;">
-          <b>Grand total - EUR:</b> {format_currency(float(totals['grand_total_eur']), 'EUR')}<br>
-          <b>USD:</b> {format_currency(float(totals['grand_total_usd']), 'USD')}
-          &nbsp; | &nbsp;
-          <b>EGP:</b> {format_currency(float(totals['grand_total_egp']), 'EGP')}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        '<div class="itkf-price-box">Accommodation: ' + format_currency(totals["room_total_eur"]) +
+        '<br>Transportation: ' + format_currency(totals["transport_total_eur"]) +
+        '<hr><b>Total: ' + format_currency(totals["grand_total_eur"]) + '</b></div>',
+        unsafe_allow_html=True)
 
-
-def _process_upload(uploaded: Any, state_key: str) -> None:
-    if uploaded is None:
-        return
-    token_key = f"_{state_key}_token"
-    token = (getattr(uploaded, "name", ""), getattr(uploaded, "size", None))
-    if st.session_state.get(token_key) == token and st.session_state.get(state_key):
-        return
+def show_summary(raw):
+    name = raw.get("federation_name") if raw.get("registration_type") == "Federation" else raw.get("guest_name")
+    st.write(f"Registration: {raw.get('registration_type', '-')}")
+    st.write(f"Name: {name or '-'}")
+    st.write(f"Email: {raw.get('email') or '-'}")
+    st.write(f"Phone: {raw.get('phone') or '-'}")
+    if raw.get("registration_type") == "Individual":
+        st.write(f"Passport number: {raw.get('passport_number') or '-'}")
+        st.write(f"Date of birth: {raw.get('date_of_birth') or '-'}")
+        st.write(f"Nationality: {raw.get('nationality') or '-'}")
+    st.subheader("Hotel")
+    st.write(f"{raw['hotel']} · {raw['meal_plan']}")
+    st.write(f"Check-in: {raw['check_in']} · Check-out: {raw['check_out']}")
     try:
-        st.session_state[state_key] = validate_uploaded_image(uploaded, image_kind=state_key)
-        st.session_state[token_key] = token
-    except ValueError as exc:
-        st.session_state[state_key] = None
-        st.session_state.pop(token_key, None)
-        st.error(str(exc))
+        totals = calculate_booking_totals(raw)
+        for room in totals["rooms"]:
+            st.write(f"{room['room_type']} × {room['quantity']} rooms · {format_currency(room['total_eur'])}")
+        st.write(f"Nights: {totals['nights']} · Guests: {totals['guests']}")
+        if totals["transport_services"]:
+            st.subheader("Transportation")
+        for i, service in enumerate(totals["transport_services"], 1):
+            next_day = " (+1 day)" if service["ends_next_day"] else ""
+            st.write(f"{i}. {service['date']} · {service['service']} · {service.get('direction', '')}")
+            st.write(f"{service['start_time']}–{service['end_time']}{next_day} (Cairo time)")
+            st.write(f"Passengers: {service['persons']} · Seats: {service['seats']}")
+            for line in service["vehicle_lines"]:
+                st.write(f"{line['vehicle']} × {line['quantity']} · {format_currency(line['total_eur'])}")
+        render_price_box(totals)
+    except (ValueError, TypeError, KeyError) as exc:
+        st.info(str(exc))
 
-
-def _remove_upload(state_key: str, widget_key: str) -> None:
-    st.session_state[state_key] = None
-    st.session_state.pop(f"_{state_key}_token", None)
-    st.session_state.pop(widget_key, None)
-
-
-def booking_from_state() -> dict[str, Any]:
-    nights = current_nights()
-    totals = current_totals()
-    return {
-        "guest_name": normalize_guest_name(st.session_state.get("guest_name")),
-        "date_of_birth": st.session_state.get("date_of_birth"),
-        "passport_number": normalize_passport_number(
-            st.session_state.get("passport_number")
-        ),
-        "nationality": str(st.session_state.get("nationality", "")).strip(),
-        "nationality_code": str(st.session_state.get("nationality_code", "")).strip(),
-        "phone_country_code": str(st.session_state.get("phone_country_code", "")).strip(),
-        "phone": str(st.session_state.get("phone", "")).strip(),
-        "phone_valid": bool(st.session_state.get("phone_valid", False)),
-        "email": str(st.session_state.get("email", "")).strip(),
-        "personal_photo": st.session_state.get("personal_photo"),
-        "passport_photo": st.session_state.get("passport_photo"),
-        "hotel": st.session_state.hotel,
-        "meal_plan": st.session_state.meal_plan,
-        "room_type": st.session_state.room_type,
-        "guests": int(st.session_state.guests),
-        "check_in": st.session_state.check_in,
-        "check_out": st.session_state.check_out,
-        "nights": nights,
-        "wants_transportation": bool(st.session_state.wants_transportation),
-        "vehicle_type": st.session_state.vehicle_type if st.session_state.wants_transportation else None,
-        "transport_service": (
-            st.session_state.transport_service if st.session_state.wants_transportation else None
-        ),
-        "transport_pricing_mode": (
-            st.session_state.transport_pricing_mode if st.session_state.wants_transportation else None
-        ),
-        "transport_persons": int(st.session_state.transport_persons) if st.session_state.wants_transportation else 0,
-        "transport_vehicle_count": (
-            int(st.session_state.transport_vehicle_count)
-            if st.session_state.wants_transportation
-            and st.session_state.transport_pricing_mode == "per_vehicle"
-            else 0
-        ),
-        **totals,
-    }
-
-
-def submission_record(raw: dict[str, Any]) -> dict[str, Any]:
-    excluded = {"personal_photo", "passport_photo"}
-    record = {key: value for key, value in raw.items() if key not in excluded}
-    record["check_in"] = raw["check_in"].isoformat()
-    record["check_out"] = raw["check_out"].isoformat()
-    record["date_of_birth"] = raw["date_of_birth"].isoformat()
-    record["booking_id"] = generate_booking_id()
-    record["booking_date"] = current_timestamp()
-    record["status"] = "Pending"
-    return record
-
-
-def attempt_pending_save() -> None:
-    pending = st.session_state.get("pending_submission")
-    if not pending:
-        return
-    with st.spinner("Saving the booking securely..."):
-        result = save_to_google_sheets(
-            pending["record"], pending.get("personal_photo"), pending.get("passport_photo")
-        )
-
+def attempt_save(record):
+    st.session_state.pending_submission = record
+    with st.spinner("Saving your request..."):
+        result = save_to_google_sheets(record)
     if not result.saved:
         st.session_state.pending_error = result.message
-        if result.data.get("error_code") == "DUPLICATE_PASSPORT":
+        # Only clear a request when the server explicitly rejected it BEFORE reserving rooms.
+        if result.data.get("error_code") in ("VALIDATION_ERROR", "DUPLICATE_PASSPORT", "SOLD_OUT", "QUOTE_CHANGED", "SCHEMA_VERSION"):
             st.session_state.pending_submission = None
-            st.session_state.current_page = "Personal"
-            st.rerun()
-        return
-
-    record = dict(pending["record"])
-    record.update(
-        {
-            "personal_photo_url": result.data.get("personal_photo_url", ""),
-            "passport_photo_url": result.data.get("passport_photo_url", ""),
-            "invoice_no": result.data.get("invoice_no", ""),
-            "invoice_url": result.data.get("invoice_url", ""),
-            "invoice_verification_code": result.data.get("invoice_verification_code", ""),
-            "invoice_sha256": result.data.get("invoice_sha256", ""),
-            "invoice_pdf_bytes": result.data.get("_invoice_pdf_bytes"),
-            "invoice_created": bool(result.data.get("invoice_created")),
-            "customer_email_sent": bool(result.data.get("customer_email_sent")),
-            "email_error": result.data.get("email_error", ""),
-            "status": result.data.get("status", "Saved"),
-            "files_ok": result.files_ok,
-        }
-    )
-    for total_key in (
-        "nightly_rate_eur",
-        "room_total_eur",
-        "transport_unit_price_egp",
-        "transport_unit_price_eur",
-        "transport_billed_units",
-        "transport_pricing_label",
-        "transport_rate_version",
-        "transport_price_per_person_eur",
-        "transport_total_eur",
-        "transport_total_egp",
-        "grand_total_eur",
-        "grand_total_usd",
-        "grand_total_egp",
-    ):
-        if total_key in result.data:
-            record[total_key] = result.data[total_key]
-    st.session_state.last_booking = record
-    st.session_state.booking_submitted = True
+        st.rerun()
+    booking = {**record, **result.data}
+    st.session_state.last_booking = booking
+    st.session_state.submitted_record = record
     st.session_state.pending_submission = None
     st.session_state.pending_error = ""
     st.rerun()
 
-
+normalize_hotel_state()
 render_header()
 render_navigation()
-
-
-if st.session_state.current_page == "Personal":
-    section_title(
-        "📝", "Personal Details", "Enter the information exactly as it appears on the passport."
-    )
-    if st.session_state.pending_error and not st.session_state.pending_submission:
-        st.error(st.session_state.pending_error)
-    st.text_input(
-        "Full Name*",
-        key="guest_name",
-        on_change=_normalize_guest_name_state,
-        placeholder="EXACTLY AS WRITTEN ON THE PASSPORT",
-    )
-
-    passport_col, birth_col = st.columns(2)
-    with passport_col:
-        st.text_input(
-            "Passport Number *",
-            key="passport_number",
-            placeholder="Letters and numbers only",
-            on_change=_normalize_passport_state,
-            max_chars=20,
-        )
-    with birth_col:
-        st.date_input(
-            "Date of Birth *",
-            key="date_of_birth",
-            min_value=date(1900, 1, 1),
-            max_value=date.today(),
-            format="YYYY-MM-DD",
-        )
-
-    country_names = [country.name for country in countries()]
-    if st.session_state.nationality not in country_names:
-        st.session_state.nationality = DEFAULT_COUNTRY.name
-    st.selectbox(
-        "Nationality / Country *",
-        country_names,
-        key="nationality",
-        on_change=_sync_country,
-    )
-    _sync_country()
-    selected_country = countries_by_name()[st.session_state.nationality]
-
-    phone_prefix_col, phone_number_col = st.columns([1, 3])
-    with phone_prefix_col:
-        st.text_input(
-            "Country Code",
-            value=selected_country.calling_code,
-            disabled=True,
-            key=f"phone_prefix_display_{selected_country.iso2}",
-        )
-    with phone_number_col:
-        st.text_input(
-            "Phone Number *",
-            key="phone_national",
-            placeholder="Enter the national or international number",
-        )
-
-    phone_valid, formatted_phone, phone_message = validate_phone(
-        selected_country.iso2, st.session_state.phone_national
-    )
-    st.session_state.phone_valid = phone_valid
-    st.session_state.phone = formatted_phone if phone_valid else ""
-    if st.session_state.phone_national:
-        if phone_valid:
-            st.success(f"Phone: {formatted_phone}")
+page = st.session_state.current_page
+if page == "Personal":
+    section_title("📝", "Registration Details")
+    st.radio("Registration Type", ["Individual", "Federation"], key="registration_type", horizontal=True)
+    if st.session_state.registration_type == "Individual":
+        st.text_input("Full Name (CAPITAL LETTERS) *", key="guest_name", on_change=normalize_name, max_chars=150)
+        left, right = st.columns(2)
+        left.text_input("Passport Number *", key="passport_number", on_change=normalize_passport, max_chars=20)
+        right.date_input("Date of Birth *", key="date_of_birth", min_value=date(1900,1,1), max_value=date.today(), format="YYYY-MM-DD")
+        st.selectbox("Nationality *", [c.name for c in countries()], key="nationality", on_change=sync_country)
+        st.text_input("Phone Number (including country code) *", key="individual_phone", placeholder="+201012345678")
+        st.text_input("Email *", key="individual_email")
+        phone_value = st.session_state.individual_phone
+    else:
+        st.text_input("Federation Name *", key="federation_name", max_chars=150)
+        st.text_input("Federation Email *", key="federation_email")
+        st.text_input("Federation Phone (including country code) *", key="federation_phone", placeholder="+201012345678")
+        phone_value = st.session_state.federation_phone
+    raw = booking_from_state()
+    if len(phone_value.strip()) > 5:
+        if raw["phone_valid"]:
+            st.caption(f"Phone: {raw['phone']}")
         else:
-            st.error(phone_message)
-
-    st.text_input("Email *", key="email")
-
-    section_title("📷", "Personal Documents")
-    st.caption(f"JPG/JPEG/PNG only. Maximum {MAX_IMAGE_SIZE_MB} MB per image.")
-    photo_col, passport_col = st.columns(2)
-    with photo_col:
-        personal_label = "Personal / Profile Photo" + (" *" if REQUIRE_PERSONAL_PHOTO else "")
-        personal_upload = st.file_uploader(
-            personal_label, type=["jpg", "jpeg", "png"], key="personal_photo_upload"
-        )
-        _process_upload(personal_upload, "personal_photo")
-        if st.session_state.personal_photo:
-            st.image(st.session_state.personal_photo["data"], caption="Personal photo preview")
-            st.button(
-                "Remove personal photo",
-                on_click=_remove_upload,
-                args=("personal_photo", "personal_photo_upload"),
-                use_container_width=True,
-            )
-    with passport_col:
-        passport_label = "Passport Photo" + (" *" if REQUIRE_PASSPORT_PHOTO else "")
-        passport_upload = st.file_uploader(
-            passport_label, type=["jpg", "jpeg", "png"], key="passport_photo_upload"
-        )
-        _process_upload(passport_upload, "passport_photo")
-        if st.session_state.passport_photo:
-            st.image(st.session_state.passport_photo["data"], caption="Passport photo preview")
-            st.button(
-                "Remove passport photo",
-                on_click=_remove_upload,
-                args=("passport_photo", "passport_photo_upload"),
-                use_container_width=True,
-            )
-
+            st.error("Please enter a valid phone number including the country code.")
     render_step_navigation(next_page="Hotel")
 
-
-elif st.session_state.current_page == "Hotel":
-    section_title(
-        "🏨",
-        "Hotel & Room Selection",
-        "Choose the dates and the application will calculate the number of nights automatically.",
-    )
-    _normalize_hotel_state()
-    st.selectbox("Select Hotel *", list(HOTELS), key="hotel", on_change=_normalize_hotel_state)
-    _normalize_hotel_state()
-    hotel_info = HOTELS[st.session_state.hotel]
-
-    with st.expander("🏨 Hotel Details", expanded=False):
-        st.write(f"⭐ Stars: {hotel_info['stars']}")
-        st.write(f"📍 Distance to Arena: {hotel_info['distance_to_arena']}")
-        st.write(f"📌 Location: {hotel_info['location']}")
-        if hotel_info.get("website"):
-            st.markdown(f"🌐 [Hotel website]({hotel_info['website']})")
-        if hotel_info.get("notes"):
-            st.write(f"📝 {hotel_info['notes']}")
-
-    plans = list(hotel_info["rates"])
-    if st.session_state.meal_plan not in plans:
-        st.session_state.meal_plan = plans[0]
-    st.radio(
-        "Meal Plan *",
-        plans,
-        key="meal_plan",
-        horizontal=True,
-        on_change=_normalize_hotel_state,
-    )
-
-    rooms = list(hotel_info["rates"][st.session_state.meal_plan])
-    if st.session_state.room_type not in rooms:
-        st.session_state.room_type = rooms[0]
-    room_col, guests_col = st.columns(2)
-    with room_col:
-        st.selectbox(
-            "Room Type *",
-            rooms,
-            key="room_type",
-            on_change=_sync_guests_to_room,
-        )
-    with guests_col:
-        _sync_guests_to_room()
-        st.number_input(
-            "Number of Guests (Automatic) *",
-            min_value=1,
-            max_value=max(ROOM_OCCUPANCY.values()),
-            step=1,
-            key="guests",
-            disabled=True,
-            help="Automatically set from the selected room type.",
-        )
-
-    date_col1, date_col2 = st.columns(2)
-    with date_col1:
-        st.date_input("Check-in Date *", key="check_in", on_change=_ensure_checkout)
-    with date_col2:
-        st.date_input("Check-out Date *", key="check_out")
-
-    nights = current_nights()
-    if nights < 1:
-        st.error("Check-out date must be after check-in date.")
-    elif nights > MAX_BOOKING_NIGHTS:
-        st.error(f"A booking cannot exceed {MAX_BOOKING_NIGHTS} nights.")
+elif page == "Hotel":
+    section_title("🏨", "Hotel & Rooms", "Choose your rooms and stay dates.")
+    st.selectbox("Select Hotel *", list(HOTELS), key="hotel", on_change=normalize_hotel_state)
+    info = HOTELS[st.session_state.hotel]
+    with st.expander("🏨 Hotel Details"):
+        st.write(f"Stars: {info['stars']} · Distance to Arena: {info['distance_to_arena']}")
+        st.write(info["location"])
+        if info.get("website"):
+            st.markdown(f"[Hotel website]({info['website']})")
+        if info.get("notes"):
+            st.write(info["notes"])
+    st.radio("Meal Plan *", list(info["rates"]), key="meal_plan", horizontal=True, on_change=normalize_hotel_state)
+    rates = info["rates"][st.session_state.meal_plan]
+    if st.session_state.registration_type == "Individual":
+        st.selectbox("Room Type *", list(rates), key="room_type")
+        st.info(f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]}")
     else:
-        st.success(f"Number of nights: {nights}")
+        for room, rate in rates.items():
+            st.number_input(f"{room} — {format_currency(rate)} / room / night", min_value=0,
+                            max_value=5000, step=1, key=room_key(room))
+        st.caption("Guests (automatic): " + str(sum(r["quantity"] * ROOM_OCCUPANCY[r["room_type"]] for r in selected_rooms())))
+    left, right = st.columns(2)
+    left.date_input("Check-in Date *", key="check_in", on_change=ensure_checkout, format="YYYY-MM-DD")
+    right.date_input("Check-out Date *", key="check_out", format="YYYY-MM-DD")
+    raw = booking_from_state()
+    try:
+        totals = calculate_booking_totals({**raw, "transport_services": []})
+        st.info(f"Number of nights: {totals['nights']} · Number of rooms: {totals['room_count']}")
+        render_price_box(totals)
+        if st.button("Check room availability", disabled=not backend_is_configured(), use_container_width=True):
+            result = check_availability(raw)
+            if result.get("ok"):
+                for room in result["availability"]:
+                    st.write(f"{room['room_type']}: {room['remaining']} room(s) available throughout this stay.")
+            else:
+                st.error(result.get("error", "Unable to check availability."))
+    except (ValueError, TypeError, KeyError) as exc:
+        st.error(str(exc))
+    render_step_navigation(back="Personal", next_page="Transportation")
 
-    totals = current_totals()
-    st.caption(
-        f"Official nightly rate: {format_currency(totals['nightly_rate_eur'], 'EUR')} - "
-        "EUR is the base currency."
-    )
-    render_price_box(totals)
-
-    render_step_navigation(back_page="Personal", next_page="Transportation")
-
-
-elif st.session_state.current_page == "Transportation":
-    section_title(
-        "🚐",
-        "Transportation",
-        "Select the service, vehicle and number of persons.",
-    )
+elif page == "Transportation":
+    section_title("🚐", "Transportation", "Whole-vehicle prices in EUR. All times are Cairo local time.")
     st.checkbox("I need transportation", key="wants_transportation")
     if st.session_state.wants_transportation:
-        _normalize_transport_state()
-        st.selectbox(
-            "Service Type *",
-            list(TRANSPORT_SERVICES),
-            format_func=lambda value: TRANSPORT_SERVICES[value],
-            key="transport_service",
-        )
-        vehicle_names = list(TRANSPORTATION)
-        if st.session_state.vehicle_type not in vehicle_names:
-            st.session_state.vehicle_type = vehicle_names[0]
-        transport_col1, transport_col2 = st.columns(2)
-        with transport_col1:
-            st.selectbox("Vehicle Type *", vehicle_names, key="vehicle_type")
-        with transport_col2:
-            allowed_modes = TRANSPORTATION[st.session_state.vehicle_type]["pricing_modes"]
-            if st.session_state.transport_pricing_mode not in allowed_modes:
-                st.session_state.transport_pricing_mode = allowed_modes[0]
-            st.selectbox(
-                "Pricing Method *",
-                list(allowed_modes),
-                format_func=lambda value: TRANSPORT_PRICING_LABELS[value],
-                key="transport_pricing_mode",
-            )
+        if not st.session_state.transport_ids:
+            add_transport()
+        for order, ident in enumerate(list(st.session_state.transport_ids), 1):
+            prefix = f"tr_{ident}_"
+            with st.expander(f"Service {order}", expanded=True):
+                st.selectbox("Service Type", list(TRANSPORT_SERVICES), key=prefix+"service",
+                             format_func=lambda v: TRANSPORT_SERVICES[v]["label"])
+                service = st.session_state[prefix+"service"]
+                directions = TRANSPORT_SERVICES[service]["directions"]
+                if directions:
+                    if st.session_state[prefix+"direction"] not in directions:
+                        st.session_state[prefix+"direction"] = directions[0]
+                    st.selectbox("Direction", directions, key=prefix+"direction")
+                st.date_input("Service Date", key=prefix+"date", format="YYYY-MM-DD")
+                a, b = st.columns(2)
+                a.time_input("From", key=prefix+"start")
+                b.time_input("To", key=prefix+"end")
+                st.checkbox("End time is on the next day", key=prefix+"next_day")
+                st.number_input("Passengers to transport", min_value=1, max_value=5000, key=prefix+"persons")
+                st.caption("Select the quantity of each vehicle you need:")
+                for i, (name, vehicle) in enumerate(TRANSPORTATION.items()):
+                    st.number_input(f"{name} — {format_currency(vehicle['prices_eur'][service])} / vehicle",
+                                    min_value=0, max_value=100, step=1, key=prefix+f"v{i}")
+                try:
+                    priced = price_transport_service(transport_from_state()[order-1])
+                    st.write(f"Seats selected: {priced['seats']} · Passengers: {priced['persons']}")
+                    if priced["remaining"]:
+                        st.warning(f"{priced['remaining']} passengers still need seats. Select an additional vehicle.")
+                        fits = vehicle_suggestions(priced["remaining"])
+                        st.caption("Suitable additional vehicles: " + (", ".join(fits) if fits else "Select multiple vehicles."))
+                    else:
+                        st.success(f"All passengers have seats. Unused seats: {priced['seats'] - priced['persons']}")
+                    st.write("Service total: " + format_currency(priced["total_eur"]))
+                except (ValueError, TypeError, KeyError) as exc:
+                    st.error(str(exc))
+                st.button("Remove this service", key=prefix+"remove", on_click=remove_transport, args=(ident,))
+        st.button("＋ Add another day / service", on_click=add_transport,
+                  disabled=len(st.session_state.transport_ids) >= MAX_TRANSPORT_SERVICES)
+        st.caption("Prices include 14% VAT. Each transfer price is for one direction; daily hire is charged at the selected package price.")
+    render_step_navigation(back="Hotel", next_page="Review")
 
-        count_col1, count_col2 = st.columns(2)
-        with count_col1:
-            st.number_input(
-                "Number of Persons *", min_value=1, max_value=500, step=1, key="transport_persons"
-            )
-        with count_col2:
-            if st.session_state.transport_pricing_mode == "per_vehicle":
-                st.number_input(
-                    "Number of Vehicles *",
-                    min_value=1,
-                    max_value=50,
-                    step=1,
-                    key="transport_vehicle_count",
-                )
-            else:
-                capacity = TRANSPORTATION[st.session_state.vehicle_type].get("capacity")
-                st.text_input(
-                    "Charging Basis",
-                    value=(f"Per person - {capacity}-seat bus" if capacity else "Per person"),
-                    disabled=True,
-                )
-
-        totals = current_totals()
-        if totals.get("transport_price_pending"):
-            st.warning(
-                "This transportation price is pending and cannot be confirmed yet."
-            )
-        else:
-            basis = str(totals.get("transport_pricing_label") or "")
-            st.info(
-                f"{basis} rate: "
-                f"{format_currency(float(totals['transport_unit_price_eur']), 'EUR')} "
-                f"({format_currency(float(totals['transport_unit_price_egp']), 'EGP')}). "
-                f"Transportation total: "
-                f"{format_currency(float(totals['transport_total_eur']), 'EUR')} / "
-                f"{format_currency(float(totals['transport_total_egp']), 'EGP')}"
-            )
-            if st.session_state.transport_pricing_mode == "per_person":
-                st.caption(
-                    "Preliminary per-person rate calculated from the quoted full-bus price "
-                    "divided by the seat count."
-                )
-        render_price_box(totals)
-    else:
-        st.info("No transportation selected. You can return here at any time.")
-
-    render_step_navigation(back_page="Hotel", next_page="Review")
-
-
-elif st.session_state.current_page == "Review":
-    section_title("🔎", "Review Your Booking", "Review all details before completing the booking.")
+elif page == "Review":
+    section_title("🔎", "Review Your Request")
     raw = booking_from_state()
-    errors = validate_booking(raw)
-    if errors:
-        st.warning("The preview is available, but the following items must be fixed before submission:")
-        for error in errors:
-            st.write(f"- {error}")
+    for error in validate_booking(raw):
+        st.warning(error)
+    show_summary(raw)
+    render_step_navigation(back="Transportation", next_page="Complete")
 
-    st.subheader("Personal Details")
-    detail_col1, detail_col2 = st.columns(2)
-    with detail_col1:
-        st.write(f"Name: {raw['guest_name'] or '-'}")
-        st.write(f"Nationality: {raw['nationality'] or '-'}")
-        st.write(f"Date of birth: {raw['date_of_birth'].isoformat() if raw['date_of_birth'] else '-'}")
-    with detail_col2:
-        st.write(f"Passport number: {raw['passport_number'] or '-'}")
-        st.write(f"Phone: {raw['phone'] or '-'}")
-        st.write(f"Email: {raw['email'] or '-'}")
-
-    image_col1, image_col2 = st.columns(2)
-    with image_col1:
-        if raw["personal_photo"]:
-            st.image(raw["personal_photo"]["data"], caption="Personal photo")
+elif page == "Complete":
+    section_title("✅", "Submit Request")
+    if st.session_state.last_booking:
+        saved = st.session_state.last_booking
+        st.success(f"Your booking request has been received successfully. Request ID: {saved['booking_id']}")
+        st.info(f"Invoice / summary number: {saved.get('invoice_no', '-')}")
+        if saved.get("_invoice_pdf_bytes"):
+            st.download_button("Download PDF", data=saved["_invoice_pdf_bytes"],
+                               file_name=saved["invoice_no"]+".pdf", mime="application/pdf", use_container_width=True)
+        if not saved.get("invoice_created"):
+            st.warning("Your request is saved. Saving the PDF copy is pending.")
+        if saved.get("customer_email_sent"):
+            st.success("The PDF was emailed to " + saved["email"])
         else:
-            st.caption("Personal photo: not uploaded")
-    with image_col2:
-        if raw["passport_photo"]:
-            st.image(raw["passport_photo"]["data"], caption="Passport photo")
-        else:
-            st.caption("Passport photo: not uploaded")
-
-    st.subheader("Hotel")
-    st.write(f"Hotel: {raw['hotel']}")
-    st.write(f"Meal plan: {raw['meal_plan']}")
-    st.write(f"Room type: {raw['room_type']}")
-    st.write(f"Guests: {raw['guests']}")
-    st.write(f"Check-in: {raw['check_in'].isoformat()}")
-    st.write(f"Check-out: {raw['check_out'].isoformat()}")
-    st.write(f"Nights: {raw['nights']}")
-
-    st.subheader("Transportation")
-    if raw["wants_transportation"]:
-        st.write(f"Service: {raw['transport_service']}")
-        st.write(f"Vehicle: {raw['vehicle_type']}")
-        st.write(f"Pricing method: {raw['transport_pricing_label']}")
-        st.write(f"Persons: {raw['transport_persons']}")
-        if raw["transport_pricing_mode"] == "per_vehicle":
-            st.write(f"Vehicles: {raw['transport_vehicle_count']}")
-        if raw.get("transport_price_pending"):
-            st.write("Transportation rate: Pending")
-        else:
-            st.write(
-                "Unit rate: "
-                f"{format_currency(raw['transport_unit_price_eur'], 'EUR')} / "
-                f"{format_currency(raw['transport_unit_price_egp'], 'EGP')}"
-            )
-            st.write(
-                "Transportation total: "
-                f"{format_currency(raw['transport_total_eur'], 'EUR')} / "
-                f"{format_currency(raw['transport_total_egp'], 'EGP')}"
-            )
-    else:
-        st.write("Not requested")
-    render_price_box(raw)
-
-    render_step_navigation(back_page="Transportation", next_page="Complete")
-
-
-elif st.session_state.current_page == "Complete":
-    section_title("✅", "Complete Booking", "The booking is confirmed only after Google Sheets saves it.")
-
-    if st.session_state.booking_submitted and st.session_state.last_booking:
-        booking = st.session_state.last_booking
-        st.success(f"Booking saved successfully. Booking ID: **{booking['booking_id']}**")
-        if booking.get("invoice_no"):
-            st.info(f"Invoice No: **{booking['invoice_no']}**")
-        if booking.get("invoice_verification_code"):
-            st.caption(f"Verification Code: {booking['invoice_verification_code']}")
-        if not booking.get("files_ok", True):
-            st.warning(
-                "The registration row was saved, but one or more images could not be uploaded. "
-                "Please contact the organizer and quote the Booking ID."
-            )
-        if not booking.get("invoice_created", False):
-            st.warning(
-                "The booking was saved, but the invoice PDF could not be stored. "
-                "Please contact the organizer and quote the Booking ID."
-            )
-        elif booking.get("customer_email_sent", False):
-            st.success(f"The invoice was emailed to {booking.get('email', 'the customer')}.")
-        else:
-            st.warning(
-                "The booking and invoice were saved, but email delivery failed. "
-                "The failure is recorded in Google Sheets and can be retried."
-            )
-            if booking.get("email_error"):
-                st.caption(str(booking["email_error"]))
-        try:
-            pdf_data = booking.get("invoice_pdf_bytes") or generate_pdf(booking)
-            st.download_button(
-                "📄 Download Invoice PDF",
-                data=pdf_data,
-                file_name=f"{booking.get('invoice_no') or booking['booking_id']}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        except Exception as exc:
-            st.warning("The booking is saved, but the invoice PDF could not be generated here.")
-            st.caption(str(exc))
-
-        if st.button("Start a New Booking", use_container_width=True):
+            st.info("Your request is saved. Email delivery is pending.")
+        if not saved.get("invoice_created") or not saved.get("customer_email_sent"):
+            if st.button("Retry PDF / email", use_container_width=True):
+                attempt_save(st.session_state.submitted_record)
+        if st.button("Start a new request", use_container_width=True):
             st.session_state.clear()
             st.rerun()
-
     else:
-        raw = booking_from_state()
-        errors = validate_booking(raw)
-        if errors:
+        if st.session_state.pending_error:
+            st.error(st.session_state.pending_error)
+        if st.session_state.pending_submission:
+            st.info("We have not yet received a final response. Retry the same request safely; do not create another request.")
+            st.caption("Request ID: " + st.session_state.pending_submission["booking_id"])
+            if st.button("Retry saving", type="primary"):
+                attempt_save(st.session_state.pending_submission)
+        else:
+            raw = booking_from_state()
+            errors = validate_booking(raw)
             for error in errors:
                 st.error(error)
-
-        if not backend_is_configured():
-            st.warning(
-                "Google Sheets is not configured yet. Complete the Apps Script and Streamlit "
-                "secrets steps in README.md before accepting real registrations."
-            )
-
-        if st.session_state.pending_submission:
-            booking_id = st.session_state.pending_submission["record"]["booking_id"]
-            st.warning(
-                f"Booking {booking_id} has not been saved yet. It remains ready for a safe retry "
-                "with the same ID, so retrying will not create a duplicate."
-            )
-            if st.session_state.pending_error:
-                st.error(st.session_state.pending_error)
-            if st.button("Retry Saving", type="primary", use_container_width=True):
-                attempt_pending_save()
-            if st.button("Cancel This Unsaved Attempt", use_container_width=True):
-                st.session_state.pending_submission = None
-                st.session_state.pending_error = ""
-                st.rerun()
-        elif st.button(
-            "✅ Complete Booking", type="primary", use_container_width=True, disabled=bool(errors)
-        ):
-            record = submission_record(raw)
-            st.session_state.pending_submission = {
-                "record": record,
-                "personal_photo": raw.get("personal_photo"),
-                "passport_photo": raw.get("passport_photo"),
-            }
-            st.session_state.pending_error = ""
-            attempt_pending_save()
-
-        render_step_navigation(back_page="Review")
+            if not backend_is_configured():
+                st.warning("The booking service is not configured.")
+            if st.button("Submit Booking Request", type="primary", use_container_width=True,
+                         disabled=bool(errors) or not backend_is_configured()):
+                record = {**raw, **calculate_booking_totals(raw),
+                          "booking_id": generate_booking_id(), "booking_date": current_timestamp()}
+                attempt_save(record)
+        render_step_navigation(back="Review")

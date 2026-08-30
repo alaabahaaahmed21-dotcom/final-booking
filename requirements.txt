@@ -5,4 +5,4 @@ reportlab>=4.2,<5
 arabic-reshaper>=3.0,<4
 python-bidi>=0.6,<1
 phonenumbers>=8.13,<10
-pycountry>=24.6,<25
+pycountry>=24.6,<27

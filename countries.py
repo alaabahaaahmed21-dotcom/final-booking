@@ -52,7 +52,7 @@ def validate_phone(country_iso2: str, raw_number: str) -> tuple[bool, str, str]:
     if not raw:
         return False, "", "Phone number is required."
     try:
-        parsed = phonenumbers.parse(raw, country_iso2.upper())
+        parsed = phonenumbers.parse(raw, None if raw.startswith("+") else country_iso2.upper())
     except phonenumbers.NumberParseException:
         return False, "", "Enter a valid phone number for the selected country."
 
@@ -62,7 +62,7 @@ def validate_phone(country_iso2: str, raw_number: str) -> tuple[bool, str, str]:
     number_region = phonenumbers.region_code_for_number(parsed)
     # Some territories share a calling code.  The library's resolved region is
     # used to prevent an unrelated country's number from being silently saved.
-    if number_region and number_region != country_iso2.upper():
+    if not raw.startswith("+") and number_region and number_region != country_iso2.upper():
         return False, "", "The phone number does not match the selected country."
 
     formatted = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)

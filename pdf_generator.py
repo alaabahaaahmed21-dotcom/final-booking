@@ -1,4 +1,4 @@
-"""Generate a compact booking confirmation PDF in memory."""
+"""Generate a numbered EUR-only booking request PDF in memory."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     Image as RLImage,
+    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -26,7 +27,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from config import EVENT_TITLE, LOGO_PATHS, SYSTEM_TITLE
+from config import BASE_DIR, EVENT_TITLE, LOGO_PATHS
 
 
 ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
@@ -34,6 +35,10 @@ FONT_REGULAR = "Helvetica"
 FONT_BOLD = "Helvetica-Bold"
 
 for regular_path, bold_path in [
+    (
+        BASE_DIR / "assets" / "fonts" / "DejaVuSans.ttf",
+        BASE_DIR / "assets" / "fonts" / "DejaVuSans-Bold.ttf",
+    ),
     (
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
@@ -124,146 +129,91 @@ def _logo_banner() -> Table | None:
 
 
 def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
+    """Numbered EUR-only request summary, with modification restrictions."""
     buffer = io.BytesIO()
-    encryption = None
-    if protect:
-        encryption = StandardEncryption(
-            userPassword="",
-            ownerPassword=secrets.token_urlsafe(32),
-            canPrint=1,
-            canModify=0,
-            canCopy=0,
-            canAnnotate=0,
-            strength=128,
-        )
+    encryption = StandardEncryption(
+        userPassword="", ownerPassword=secrets.token_urlsafe(32),
+        canPrint=1, canModify=0, canCopy=0, canAnnotate=0, strength=128,
+    ) if protect else None
     document = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=18 * mm,
-        leftMargin=18 * mm,
-        topMargin=12 * mm,
-        bottomMargin=12 * mm,
-        title=f"Invoice {_safe(booking.get('invoice_no') or booking.get('booking_id'))}",
-        encrypt=encryption,
+        buffer, pagesize=A4, leftMargin=16*mm, rightMargin=16*mm,
+        topMargin=12*mm, bottomMargin=17*mm, encrypt=encryption,
+        title="Booking Request " + str(booking.get("invoice_no", "")),
     )
-
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ITKFTitle",
-        parent=styles["Title"],
-        alignment=TA_CENTER,
-        textColor=colors.HexColor("#C8102E"),
-        fontName=FONT_BOLD,
-        fontSize=18,
-        leading=22,
-    )
-    subtitle_style = ParagraphStyle(
-        "ITKFSubtitle",
-        parent=styles["Normal"],
-        alignment=TA_CENTER,
-        fontName=FONT_REGULAR,
-        fontSize=10,
-    )
-    heading_style = ParagraphStyle(
-        "ITKFHeading", parent=styles["Heading2"], fontName=FONT_BOLD, fontSize=14
-    )
-    cell_style = ParagraphStyle(
-        "ITKFCell", parent=styles["Normal"], fontName=FONT_REGULAR, fontSize=8.2, leading=10
-    )
-    label_style = ParagraphStyle(
-        "ITKFLabel", parent=cell_style, fontName=FONT_BOLD, textColor=colors.HexColor("#374151")
-    )
-
+    title = ParagraphStyle("ITKFTitle", parent=styles["Title"], fontName=FONT_BOLD,
+                           fontSize=17, leading=21, textColor=colors.HexColor("#C8102E"), alignment=TA_CENTER)
+    normal = ParagraphStyle("ITKFNormal", parent=styles["Normal"], fontName=FONT_REGULAR, fontSize=8.5, leading=12)
+    heading = ParagraphStyle("ITKFHeading", parent=normal, fontName=FONT_BOLD, fontSize=11, leading=15,
+                             spaceBefore=9, spaceAfter=5, keepWithNext=True)
+    centered = ParagraphStyle("ITKFCentered", parent=normal, alignment=TA_CENTER)
+    def paragraph(value):
+        return Paragraph(_safe(value), normal)
+    def table(rows, widths, header=False):
+        obj = Table([[paragraph(v) for v in row] for row in rows], colWidths=widths,
+                    repeatRows=1 if header else 0, hAlign="LEFT")
+        rules = [("VALIGN",(0,0),(-1,-1),"TOP"),
+                 ("LINEBELOW",(0,0),(-1,-1),0.25,colors.HexColor("#DDDDDD")),
+                 ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),
+                 ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)]
+        if header:
+            rules.append(("BACKGROUND",(0,0),(-1,0),colors.HexColor("#F3F4F6")))
+        obj.setStyle(TableStyle(rules))
+        return obj
     story = []
-    logo_banner = _logo_banner()
-    if logo_banner is not None:
-        story.extend([logo_banner, Spacer(1, 3 * mm)])
-    story.extend(
-        [
-            Paragraph(_safe(EVENT_TITLE), title_style),
-            Paragraph(_safe(SYSTEM_TITLE), subtitle_style),
-            Spacer(1, 5 * mm),
-            Paragraph("Booking Invoice", heading_style),
-        ]
-    )
-
-    rows = [
-        ["Invoice No", _safe(booking.get("invoice_no") or booking.get("booking_id"))],
-        ["Verification Code", _safe(booking.get("invoice_verification_code"))],
-        ["Booking ID", _safe(booking.get("booking_id"))],
-        ["Booking Date", _safe(booking.get("booking_date"))],
-        ["Guest Name", _safe(booking.get("guest_name"))],
-        ["Date of Birth", _safe(booking.get("date_of_birth"))],
-        ["Passport Number", _safe(booking.get("passport_number"))],
-        ["Nationality", _safe(booking.get("nationality"))],
-        ["Phone", _safe(booking.get("phone"))],
-        ["Email", _safe(booking.get("email"))],
-        ["Hotel", _safe(booking.get("hotel"))],
-        ["Meal Plan", _safe(booking.get("meal_plan"))],
-        ["Room Type", _safe(booking.get("room_type"))],
-        ["Guests", _safe(booking.get("guests"))],
-        ["Check-in", _safe(booking.get("check_in"))],
-        ["Check-out", _safe(booking.get("check_out"))],
-        ["Nights", _safe(booking.get("nights"))],
-        ["Vehicle", _safe(booking.get("vehicle_type"))],
-        ["Transportation Service", _safe(booking.get("transport_service"))],
-        ["Pricing Method", _safe(booking.get("transport_pricing_label"))],
-        ["Transportation Persons", _safe(booking.get("transport_persons"))],
-        [
-            "Number of Vehicles",
-            _safe(
-                booking.get("transport_vehicle_count")
-                if booking.get("transport_pricing_mode") == "per_vehicle"
-                else None
-            ),
-        ],
-        ["Billed Units", _safe(booking.get("transport_billed_units"))],
-        [
-            "Transportation Unit Rate",
-            _money(booking.get("transport_unit_price_eur"), "EUR")
-            + " / "
-            + _money(booking.get("transport_unit_price_egp"), "EGP"),
-        ],
-        ["Room Total", _money(booking.get("room_total_eur"), "EUR")],
-        [
-            "Transportation Total",
-            _money(booking.get("transport_total_eur"), "EUR")
-            + " / "
-            + _money(booking.get("transport_total_egp"), "EGP"),
-        ],
-        ["Grand Total", _money(booking.get("grand_total_eur"), "EUR")],
-        ["USD Equivalent", _money(booking.get("grand_total_usd"), "USD")],
-        ["EGP Equivalent", _money(booking.get("grand_total_egp"), "EGP")],
-        ["Status", _safe(booking.get("status"))],
+    banner = _logo_banner()
+    if banner:
+        story.extend([banner, Spacer(1,3*mm)])
+    story.extend([Paragraph(_safe(EVENT_TITLE),title),
+                  Paragraph("Booking Request Summary",centered), Spacer(1,5*mm)])
+    individual = booking.get("registration_type") == "Individual"
+    details = [
+        ["Invoice / Summary No",booking.get("invoice_no")],
+        ["Request ID",booking.get("booking_id")],
+        ["Verification Code",booking.get("invoice_verification_code")],
+        ["Request Date",booking.get("booking_date")],
+        ["Registration Type",booking.get("registration_type")],
+        ["Guest Name" if individual else "Federation Name",
+         booking.get("guest_name") if individual else booking.get("federation_name")],
+        ["Email",booking.get("email")], ["Phone",booking.get("phone")],
     ]
-
-    formatted_rows = [
-        [Paragraph(str(label), label_style), Paragraph(str(value), cell_style)]
-        for label, value in rows
-    ]
-    table = Table(formatted_rows, colWidths=[50 * mm, 105 * mm], repeatRows=0)
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F3F4F6")),
-                ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#374151")),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]
-        )
-    )
-    story.extend([table, Spacer(1, 8 * mm)])
-    story.append(
-        Paragraph(
-            "This is a protected, non-editable invoice. Keep it and quote the Booking ID "
-            "and Verification Code in any communication.",
-            ParagraphStyle("ITKFFooter", parent=cell_style, fontSize=9),
-        )
-    )
-
-    document.build(story)
+    if individual:
+        details.extend([["Nationality",booking.get("nationality")],["Date of Birth",booking.get("date_of_birth")],
+                        ["Passport Number",booking.get("passport_number")]])
+    story.append(table(details,[48*mm,130*mm]))
+    story.append(Paragraph("Accommodation",heading))
+    story.append(paragraph(booking.get("hotel")))
+    story.append(paragraph(str(booking.get("meal_plan",""))+" | "+str(booking.get("check_in",""))+
+                           " to "+str(booking.get("check_out",""))+" | "+str(booking.get("nights",""))+" nights"))
+    rows = [["Room Type","Rooms","EUR / Night","Total EUR"]]
+    for item in booking.get("rooms", []):
+        rows.append([item["room_type"],item["quantity"],_money(item["unit_rate_eur"],"EUR"),_money(item["total_eur"],"EUR")])
+    story.extend([Spacer(1,2*mm),table(rows,[69*mm,19*mm,44*mm,46*mm],True),
+                  paragraph("Guests: "+str(booking.get("guests","")))])
+    for index,item in enumerate(booking.get("transport_services", []),1):
+        section = [Paragraph(f"Transportation {index}",heading)]
+        suffix=" (ends next day)" if item.get("ends_next_day") else ""
+        section.append(paragraph(f"{item['date']} | {item['service']} | {item.get('direction','')}"))
+        section.append(paragraph(f"{item['start_time']} - {item['end_time']}{suffix} | Cairo local time"))
+        section.append(paragraph(f"Passengers: {item['persons']} | Seats: {item['seats']}"))
+        rows = [["Vehicle","Quantity","EUR / Vehicle","Total EUR"]]
+        for line in item.get("vehicle_lines",[]):
+            rows.append([line["vehicle"],line["quantity"],_money(line["unit_price_eur"],"EUR"),_money(line["total_eur"],"EUR")])
+        section.extend([Spacer(1,2*mm),table(rows,[69*mm,19*mm,44*mm,46*mm],True)])
+        story.append(KeepTogether(section))
+    story.append(Paragraph("Total",heading))
+    story.append(table([["Accommodation",_money(booking.get("room_total_eur"),"EUR")],
+                        ["Transportation",_money(booking.get("transport_total_eur"),"EUR")],
+                        ["Grand Total",_money(booking.get("grand_total_eur"),"EUR")]], [116*mm,62*mm]))
+    if booking.get("transport_services"):
+        story.append(paragraph("Transportation prices include 14% VAT."))
+    story.extend([Spacer(1,4*mm),paragraph("Request received successfully. Please quote your Request ID in any communication.")])
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(FONT_REGULAR,7)
+        canvas.setFillColor(colors.HexColor("#6B7280"))
+        canvas.drawString(16*mm,9*mm,str(booking.get("invoice_no","")))
+        canvas.drawRightString(194*mm,9*mm,f"Page {doc.page}")
+        canvas.restoreState()
+    document.build(story,onFirstPage=footer,onLaterPages=footer)
     return buffer.getvalue()
