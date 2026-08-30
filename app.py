@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import html
 import mimetypes
 from datetime import date, timedelta, time as dt_time
@@ -17,7 +18,7 @@ from config import (BORDER_COLOR, DEFAULT_COUNTRY_CODE, EVENT_TITLE, HEADER_BG_C
 from countries import countries, countries_by_name, country_for_code, validate_phone
 from helpers import (calculate_booking_totals, generate_booking_id, current_timestamp,
     normalize_guest_name, normalize_passport_number, validate_booking, format_currency,
-    price_transport_service, vehicle_suggestions)
+    price_transport_service, vehicle_suggestions, transport_schedule_dates)
 from sheets import backend_is_configured, save_to_google_sheets, check_availability
 
 
@@ -441,7 +442,7 @@ def first_choices():
 DEFAULT_HOTEL, DEFAULT_MEAL, DEFAULT_ROOM = first_choices()
 DEFAULT_COUNTRY = country_for_code(DEFAULT_COUNTRY_CODE)
 DEFAULTS = {
-    "current_page": "Personal", "registration_type": "Individual",
+    "current_page": "Registration", "registration_type": "",
     "guest_name": "", "date_of_birth": None, "passport_number": "",
     "nationality": DEFAULT_COUNTRY.name,
     "individual_phone": DEFAULT_COUNTRY.calling_code, "individual_email": "",
@@ -463,7 +464,12 @@ PAGES = ["Personal", "Hotel", "Transportation", "Review", "Complete"]
 def go_to(page):
     st.session_state.current_page = page
 
+def choose_registration(kind):
+    st.session_state.registration_type = kind
+    go_to("Personal")
+
 def render_navigation():
+    st.button("← Registration type", key="nav_Registration", on_click=go_to, args=("Registration",))
     for col, page in zip(st.columns(len(PAGES)), PAGES):
         with col:
             st.button("Transport" if page == "Transportation" else page,
@@ -536,21 +542,68 @@ def add_transport():
         st.session_state[f"tr_{ident}_{name}"] = value
     for index in range(len(TRANSPORTATION)):
         st.session_state[f"tr_{ident}_v{index}"] = 0
+    ensure_transport_schedule_state(ident)
+
+def ensure_transport_schedule_state(ident):
+    """Also migrate an in-progress single-date service without losing its inputs."""
+    prefix = f"tr_{ident}_"
+    first = st.session_state[prefix+"date"]
+    defaults = {"date_mode": "One date", "range_start": first,
+                "range_end": max(first, st.session_state.check_out - timedelta(days=1)),
+                "excluded_dates": [], "selected_dates": [], "date_options": [], "pick_date": first}
+    for name, value in defaults.items():
+        if prefix+name not in st.session_state:
+            st.session_state[prefix+name] = value
+
+def add_selected_transport_date(ident):
+    prefix = f"tr_{ident}_"
+    picked = st.session_state[prefix+"pick_date"]
+    selected = st.session_state[prefix+"selected_dates"]
+    if isinstance(picked, date) and (picked in selected or len(selected) < MAX_TRANSPORT_SERVICES):
+        st.session_state[prefix+"date_options"] = sorted(set(st.session_state[prefix+"date_options"] + [picked]))
+        st.session_state[prefix+"selected_dates"] = sorted(set(selected + [picked]))
+
+def duplicate_transport(ident):
+    if len(st.session_state.transport_ids) >= MAX_TRANSPORT_SERVICES:
+        return
+    new_id = uuid.uuid4().hex[:10]
+    prefix = f"tr_{ident}_"
+    for key in list(st.session_state):
+        if key.startswith(prefix) and not key.endswith("_remove"):
+            st.session_state[f"tr_{new_id}_"+key[len(prefix):]] = copy.deepcopy(st.session_state[key])
+    st.session_state.transport_ids = st.session_state.transport_ids + [new_id]
 
 def remove_transport(ident):
     st.session_state.transport_ids = [item for item in st.session_state.transport_ids if item != ident]
+
+def transport_dates_from_state(ident):
+    ensure_transport_schedule_state(ident)
+    key = lambda name: st.session_state[f"tr_{ident}_{name}"]
+    return transport_schedule_dates(key("date_mode"), single_date=key("date"),
+        start_date=key("range_start"), end_date=key("range_end"),
+        selected_dates=key("selected_dates"), excluded_dates=key("excluded_dates"))
+
+def transport_template_from_state(ident):
+    key = lambda name: st.session_state[f"tr_{ident}_{name}"]
+    return {"service": key("service"),
+            "direction": key("direction") if TRANSPORT_SERVICES[key("service")]["directions"] else "",
+            "start_time": key("start").strftime("%H:%M"), "end_time": key("end").strftime("%H:%M"),
+            "ends_next_day": key("next_day"), "persons": key("persons"),
+            "vehicles": {name: key(f"v{i}") for i, name in enumerate(TRANSPORTATION) if key(f"v{i}") > 0}}
 
 def transport_from_state():
     if not st.session_state.wants_transportation:
         return []
     items = []
-    for ident in st.session_state.transport_ids:
-        key = lambda name: st.session_state[f"tr_{ident}_{name}"]
-        items.append({"date": key("date").isoformat(), "service": key("service"),
-                      "direction": key("direction") if TRANSPORT_SERVICES[key("service")]["directions"] else "",
-                      "start_time": key("start").strftime("%H:%M"), "end_time": key("end").strftime("%H:%M"),
-                      "ends_next_day": key("next_day"), "persons": key("persons"),
-                      "vehicles": {name: key(f"v{i}") for i, name in enumerate(TRANSPORTATION) if key(f"v{i}") > 0}})
+    for order, ident in enumerate(st.session_state.transport_ids, 1):
+        try:
+            dates = transport_dates_from_state(ident)
+            template = transport_template_from_state(ident)
+            items.extend({**copy.deepcopy(template), "date": value} for value in dates)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Service {order}: {exc}") from exc
+    if len(items) > MAX_TRANSPORT_SERVICES:
+        raise ValueError(f"Choose at most {MAX_TRANSPORT_SERVICES} dated services in one request. Each repeated date counts as one service.")
     return items
 
 def booking_from_state():
@@ -571,8 +624,12 @@ def booking_from_state():
            "phone": phone if valid else "", "phone_valid": valid,
            "email": (state.individual_email if individual else state.federation_email).strip(),
            "hotel": state.hotel, "meal_plan": state.meal_plan, "rooms": selected_rooms(),
-           "check_in": state.check_in.isoformat(), "check_out": state.check_out.isoformat(),
-           "transport_services": transport_from_state()}
+           "check_in": state.check_in.isoformat(), "check_out": state.check_out.isoformat()}
+    try:
+        raw["transport_services"] = transport_from_state()
+    except (ValueError, TypeError) as exc:
+        raw["transport_services"] = []
+        raw["transport_schedule_error"] = str(exc)
     return raw
 
 def render_price_box(totals):
@@ -595,6 +652,9 @@ def show_summary(raw):
     st.subheader("Hotel")
     st.write(f"{raw['hotel']} · {raw['meal_plan']}")
     st.write(f"Check-in: {raw['check_in']} · Check-out: {raw['check_out']}")
+    if raw.get("transport_schedule_error"):
+        st.info("Complete the transportation dates before reviewing the final total.")
+        return
     try:
         totals = calculate_booking_totals(raw)
         for room in totals["rooms"]:
@@ -632,11 +692,26 @@ def attempt_save(record):
 
 normalize_hotel_state()
 render_header()
+if not st.session_state.registration_type:
+    st.session_state.current_page = "Registration"
+if st.session_state.current_page == "Registration":
+    section_title("🥋", "Choose Your Registration Type", "Select one option to begin your booking request.")
+    with st.container(border=True):
+        st.subheader("Federation Registration")
+        st.write("Book for your federation or delegation, with multiple rooms and group transportation.")
+        st.button("Continue as a Federation →", key="choose_Federation", type="primary",
+                  use_container_width=True, on_click=choose_registration, args=("Federation",))
+    with st.container(border=True):
+        st.subheader("Individual Registration")
+        st.write("Book one room using your personal and passport details, with optional transportation.")
+        st.button("Continue as an Individual →", key="choose_Individual", type="primary",
+                  use_container_width=True, on_click=choose_registration, args=("Individual",))
+    st.stop()
 render_navigation()
 page = st.session_state.current_page
 if page == "Personal":
     section_title("📝", "Registration Details")
-    st.radio("Registration Type", ["Individual", "Federation"], key="registration_type", horizontal=True)
+    st.caption("Registration type: " + st.session_state.registration_type)
     if st.session_state.registration_type == "Individual":
         st.text_input("Full Name (CAPITAL LETTERS) *", key="guest_name", on_change=normalize_name, max_chars=150)
         left, right = st.columns(2)
@@ -657,7 +732,7 @@ if page == "Personal":
             st.caption(f"Phone: {raw['phone']}")
         else:
             st.error("Please enter a valid phone number including the country code.")
-    render_step_navigation(next_page="Hotel")
+    render_step_navigation(back="Registration", next_page="Hotel")
 
 elif page == "Hotel":
     section_title("🏨", "Hotel & Rooms", "Choose your rooms and stay dates.")
@@ -706,6 +781,7 @@ elif page == "Transportation":
         if not st.session_state.transport_ids:
             add_transport()
         for order, ident in enumerate(list(st.session_state.transport_ids), 1):
+            ensure_transport_schedule_state(ident)
             prefix = f"tr_{ident}_"
             with st.expander(f"Service {order}", expanded=True):
                 st.selectbox("Service Type", list(TRANSPORT_SERVICES), key=prefix+"service",
@@ -716,7 +792,33 @@ elif page == "Transportation":
                     if st.session_state[prefix+"direction"] not in directions:
                         st.session_state[prefix+"direction"] = directions[0]
                     st.selectbox("Direction", directions, key=prefix+"direction")
-                st.date_input("Service Date", key=prefix+"date", format="YYYY-MM-DD")
+                st.selectbox("When do you need this service?", ["One date", "Date range", "Specific dates"],
+                             key=prefix+"date_mode",
+                             format_func=lambda v: {"One date":"One date", "Date range":"Repeat daily — from / to", "Specific dates":"Choose specific dates"}[v])
+                mode = st.session_state[prefix+"date_mode"]
+                if mode == "One date":
+                    st.date_input("Service Date", key=prefix+"date", format="YYYY-MM-DD")
+                elif mode == "Date range":
+                    a, b = st.columns(2)
+                    a.date_input("First service date", key=prefix+"range_start", format="YYYY-MM-DD")
+                    b.date_input("Last service date", key=prefix+"range_end", format="YYYY-MM-DD")
+                    st.caption("Both dates are included. The same vehicles and times apply to every selected day.")
+                    try:
+                        options = [date.fromisoformat(value) for value in transport_schedule_dates("Date range",
+                            start_date=st.session_state[prefix+"range_start"], end_date=st.session_state[prefix+"range_end"])]
+                        st.session_state[prefix+"excluded_dates"] = [value for value in st.session_state[prefix+"excluded_dates"] if value in options]
+                        st.multiselect("Skip dates (optional)", options, key=prefix+"excluded_dates",
+                                       format_func=lambda v: v.strftime("%a, %d %b %Y"))
+                    except (ValueError, TypeError):
+                        pass  # The shared validation below displays the exact problem.
+                else:
+                    st.date_input("Pick a date", key=prefix+"pick_date", format="YYYY-MM-DD")
+                    st.button("＋ Add selected date", key="action_add_date_"+ident,
+                              on_click=add_selected_transport_date, args=(ident,),
+                              disabled=len(st.session_state[prefix+"selected_dates"]) >= MAX_TRANSPORT_SERVICES)
+                    st.multiselect("Selected service dates", st.session_state[prefix+"date_options"],
+                                   key=prefix+"selected_dates", format_func=lambda v: v.strftime("%a, %d %b %Y"))
+                    st.caption("Add each date once. Remove a date using its ×. The same vehicles and times apply to all selected dates.")
                 a, b = st.columns(2)
                 a.time_input("From", key=prefix+"start")
                 b.time_input("To", key=prefix+"end")
@@ -727,7 +829,8 @@ elif page == "Transportation":
                     st.number_input(f"{name} — {format_currency(vehicle['prices_eur'][service])} / vehicle",
                                     min_value=0, max_value=100, step=1, key=prefix+f"v{i}")
                 try:
-                    priced = price_transport_service(transport_from_state()[order-1])
+                    dates = transport_dates_from_state(ident)
+                    priced = price_transport_service({**transport_template_from_state(ident), "date": dates[0]})
                     st.write(f"Seats selected: {priced['seats']} · Passengers: {priced['persons']}")
                     if priced["remaining"]:
                         st.warning(f"{priced['remaining']} passengers still need seats. Select an additional vehicle.")
@@ -735,12 +838,22 @@ elif page == "Transportation":
                         st.caption("Suitable additional vehicles: " + (", ".join(fits) if fits else "Select multiple vehicles."))
                     else:
                         st.success(f"All passengers have seats. Unused seats: {priced['seats'] - priced['persons']}")
-                    st.write("Service total: " + format_currency(priced["total_eur"]))
+                    st.info(f"{len(dates)} date(s) × {format_currency(priced['total_eur'])} per date = {format_currency(priced['total_eur'] * len(dates))}")
+                    with st.expander("View selected dates"):
+                        st.write(", ".join(dates))
                 except (ValueError, TypeError, KeyError) as exc:
                     st.error(str(exc))
                 st.button("Remove this service", key=prefix+"remove", on_click=remove_transport, args=(ident,))
-        st.button("＋ Add another day / service", on_click=add_transport,
+                st.button("Duplicate service", key="action_duplicate_"+ident, on_click=duplicate_transport, args=(ident,),
+                          disabled=len(st.session_state.transport_ids) >= MAX_TRANSPORT_SERVICES)
+        st.button("＋ Add another service", on_click=add_transport,
                   disabled=len(st.session_state.transport_ids) >= MAX_TRANSPORT_SERVICES)
+        try:
+            services = transport_from_state()
+            total = sum(price_transport_service(item)["total_eur"] for item in services)
+            st.write(f"All transportation: {len(services)} dated service(s) · {format_currency(total)}")
+        except (ValueError, TypeError, KeyError) as exc:
+            st.warning(str(exc))
         st.caption("Prices include 14% VAT. Each transfer price is for one direction; daily hire is charged at the selected package price.")
     render_step_navigation(back="Hotel", next_page="Review")
 

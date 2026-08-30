@@ -46,6 +46,30 @@ def stay_dates(check_in: Any, check_out: Any) -> list[str]:
         raise ValueError(f"Stay must be between 1 and {MAX_BOOKING_NIGHTS} nights.")
     return [(first + timedelta(days=i)).isoformat() for i in range(nights)]
 
+def transport_schedule_dates(mode: str, *, single_date=None, start_date=None,
+                             end_date=None, selected_dates=None, excluded_dates=None) -> list[str]:
+    """Return unique service dates. Unlike hotel nights, range end is included."""
+    if mode == "One date":
+        dates = [iso_date(single_date)]
+    elif mode == "Date range":
+        first, last = iso_date(start_date), iso_date(end_date)
+        count = (last - first).days + 1
+        if not 1 <= count <= MAX_TRANSPORT_SERVICES:
+            raise ValueError(f"Choose a date range of 1 to {MAX_TRANSPORT_SERVICES} days, with the end on or after the start.")
+        excluded = {iso_date(value) for value in (excluded_dates or [])}
+        dates = [first + timedelta(days=i) for i in range(count)
+                 if first + timedelta(days=i) not in excluded]
+    elif mode == "Specific dates":
+        dates = [iso_date(value) for value in (selected_dates or [])]
+    else:
+        raise ValueError("Choose how often this transportation service repeats.")
+    result = sorted({value.isoformat() for value in dates})
+    if not result:
+        raise ValueError("Select at least one date for this service.")
+    if len(result) > MAX_TRANSPORT_SERVICES:
+        raise ValueError(f"Select at most {MAX_TRANSPORT_SERVICES} service dates.")
+    return result
+
 def time_minutes(value: Any) -> int:
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(value)):
         raise ValueError("Choose a valid start and end time.")
@@ -133,6 +157,8 @@ def calculate_booking_totals(booking: dict) -> dict:
 
 def validate_booking(booking: dict[str, Any]) -> list[str]:
     errors = []
+    if booking.get("transport_schedule_error"):
+        errors.append(str(booking["transport_schedule_error"]))
     kind = booking.get("registration_type")
     if kind not in ("Individual", "Federation"):
         errors.append("Choose Individual or Federation registration.")
