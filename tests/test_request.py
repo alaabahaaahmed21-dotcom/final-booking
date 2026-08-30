@@ -55,7 +55,7 @@ class RequestTests(unittest.TestCase):
 
     def test_checkout_message_and_maximum_stay_are_distinct(self):
         for end in ('2026-10-23','2026-10-24'):
-            with self.assertRaisesRegex(ValueError,'^Check out date must be after check in date\\.$'):
+            with self.assertRaisesRegex(ValueError,'^The check-out date must be after the check-in date\\.$'):
                 stay_dates('2026-10-24',end)
         with self.assertRaisesRegex(ValueError,'^Stay cannot exceed 60 nights\\.$'):
             stay_dates('2026-10-01','2026-12-01')
@@ -103,6 +103,14 @@ class RequestTests(unittest.TestCase):
     def test_capacity_shortage(self):
         b=example(); s=service(); s["vehicles"]={"Bus (50 Seats)":1}; b["transport_services"]=[s]
         self.assertIn("10 remaining", " ".join(validate_booking(b)))
+    def test_surplus_or_exact_seats_allowed_at_full_vehicle_price(self):
+        for persons in (1, 40, 50):
+            b=example(); s=service()
+            s.update(persons=persons, vehicles={"Bus (50 Seats)":1})
+            b['transport_services']=[s]
+            self.assertEqual(validate_booking(b), [])
+            priced=calculate_booking_totals(b)['transport_services'][0]
+            self.assertEqual((priced['seats'],priced['remaining'],priced['total_eur']), (50,0,190))
     def test_multiple_days(self):
         b=example(); one=service(); two=copy.deepcopy(one); two["date"]="2026-10-25"
         b["transport_services"]=[one,two]

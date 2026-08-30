@@ -43,7 +43,7 @@ def stay_dates(check_in: Any, check_out: Any) -> list[str]:
     first = iso_date(check_in)
     nights = calculate_nights(check_in, check_out)
     if nights < 1:
-        raise ValueError("Check out date must be after check in date.")
+        raise ValueError("The check-out date must be after the check-in date.")
     if nights > MAX_BOOKING_NIGHTS:
         raise ValueError(f"Stay cannot exceed {MAX_BOOKING_NIGHTS} nights.")
     return [(first + timedelta(days=i)).isoformat() for i in range(nights)]
@@ -169,39 +169,81 @@ def calculate_booking_totals(booking: dict) -> dict:
             "transport_total_eur": total_transport, "grand_total_eur": money(subtotal + total_transport),
             "transport_rate_version": TRANSPORT_RATE_VERSION}
 
-def validate_booking(booking: dict[str, Any]) -> list[str]:
-    errors = []
-    if booking.get("transport_schedule_error"):
-        errors.append(str(booking["transport_schedule_error"]))
+def validate_personal_fields(booking: dict[str, Any]) -> dict[str, str]:
+    """Use the same field-level rules in the wizard and final validation."""
+    errors = {}
     kind = booking.get("registration_type")
     if kind not in ("Individual", "Federation"):
-        errors.append("Choose Individual or Federation registration.")
+        errors["registration_type"] = "Choose Individual or Federation registration."
     field = "federation_name" if kind == "Federation" else "guest_name"
-    if not str(booking.get(field, "")).strip() or len(str(booking.get(field, ""))) > 150:
-        errors.append("Enter a name of up to 150 characters.")
+    label = "Federation name" if kind == "Federation" else "Full name"
+    if not str(booking.get(field) or "").strip():
+        errors[field] = f"{label} is required."
+    elif len(str(booking[field])) > 150:
+        errors[field] = f"{label} must not exceed 150 characters."
     if kind == "Federation":
         country = str(booking.get("federation_country") or "").strip()
         code = str(booking.get("federation_country_code") or "")
         if not country or len(country) > 150 or not re.fullmatch(r"[A-Z]{2}", code):
-            errors.append("Please select the federation country.")
+            errors["federation_country"] = "Please select the federation country."
     if kind == "Individual":
         if not booking.get("nationality"):
-            errors.append("Nationality is required.")
+            errors["nationality"] = "Nationality is required."
         if not PASSPORT_NUMBER_RE.fullmatch(normalize_passport_number(booking.get("passport_number"))):
-            errors.append("Passport number must contain 5 to 20 letters or numbers.")
+            errors["passport_number"] = "Passport number is required (5 to 20 letters or numbers)."
         try:
             dob = iso_date(booking.get("date_of_birth"))
             if not date(1900, 1, 1) <= dob <= date.today():
                 raise ValueError()
         except (ValueError, TypeError):
-            errors.append("Please enter a valid date of birth.")
+            errors["date_of_birth"] = "Please enter a valid date of birth."
+    prefix = "federation" if kind == "Federation" else "individual"
     if not booking.get("phone_valid") or not re.fullmatch(r"\+[1-9]\d{6,14}", str(booking.get("phone", ""))):
-        errors.append("Enter a valid international phone number, including the country code.")
+        errors[prefix + "_phone"] = "Enter a valid international phone number, including the country code."
     if not EMAIL_RE.fullmatch(str(booking.get("email", "")).strip()):
-        errors.append("Enter a valid email address.")
+        errors[prefix + "_email"] = "Enter a valid email address."
+    return errors
+
+
+def validate_hotel_fields(booking: dict[str, Any]) -> dict[str, str]:
+    errors = {}
+    rates = HOTELS.get(booking.get("hotel"), {}).get("rates", {})
+    if not rates:
+        errors["hotel"] = "Choose a valid hotel."
+    elif booking.get("meal_plan") not in rates:
+        errors["meal_plan"] = "Choose a valid meal plan."
+    for key, label in (("check_in", "check-in"), ("check_out", "check-out")):
+        try:
+            iso_date(booking.get(key))
+        except (ValueError, TypeError):
+            errors[key] = f"Please enter a valid {label} date."
+    if "check_in" not in errors and "check_out" not in errors:
+        try:
+            stay_dates(booking["check_in"], booking["check_out"])
+        except ValueError as exc:
+            errors["check_out"] = str(exc)
+    if not booking.get("rooms"):
+        errors["rooms"] = "Select at least one room."
+    if not errors:
+        try:
+            calculate_booking_totals({**booking, "transport_services": []})
+        except (ValueError, TypeError, KeyError) as exc:
+            errors["rooms"] = str(exc)
+    return errors
+
+
+def validate_booking(booking: dict[str, Any]) -> list[str]:
+    errors = list(validate_personal_fields(booking).values())
+    hotel_errors = validate_hotel_fields(booking)
+    errors.extend(hotel_errors.values())
+    if booking.get("transport_schedule_error"):
+        errors.append(str(booking["transport_schedule_error"]))
     try:
-        totals = calculate_booking_totals(booking)
-        for index, service in enumerate(totals["transport_services"], 1):
+        services = booking.get("transport_services", [])
+        if not isinstance(services, list) or len(services) > MAX_TRANSPORT_SERVICES:
+            raise ValueError("Too many transportation services.")
+        for index, item in enumerate(services, 1):
+            service = price_transport_service(item)
             if service["remaining"]:
                 errors.append(f"Transportation {index}: add seats for {service['remaining']} remaining passengers.")
     except (ValueError, TypeError, KeyError) as exc:

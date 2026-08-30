@@ -82,6 +82,11 @@ call('writeRow_',invctx,stock._row,{Capacity:10},stock);
 busy=true;failure('BUSY',()=>call('createBooking_',changed(fixture,'3'),{}));busy=false;assert.equal(all('Bookings').length,1);
 const short=changed(fixture,'4');delete short.transport_services[0].vehicles['Toyota Hiace (10 Seats)'];
 failure('VALIDATION_ERROR',()=>call('createBooking_',short,{}));
+for (const passengers of [1,40,50]) {
+  const excess=clone(short.transport_services[0]);excess.persons=passengers;
+  const accepted=call('transport_',[excess])[0];
+  assert.equal(accepted.seats,50);assert.equal(accepted.remaining,0);assert.equal(accepted.total_eur,190);
+}
 const person=changed(fixture,'5');person.registration_type='Individual';person.guest_name='test person';person.federation_name='';person.passport_number='ab-12345';person.date_of_birth='1996-03-21';person.nationality='Egypt';person.nationality_code='EG';
 result=call('createBooking_',person,invoice(person));assert(result.saved);
 const duplicate=changed(person,'6');duplicate.passport_number='AB12345';failure('DUPLICATE_PASSPORT',()=>call('createBooking_',duplicate,{}));
@@ -96,7 +101,7 @@ const override={Hotel:fixture.hotel,'Room Type':'Double',Date:'2026-10-25',Capac
 assert.equal(call('availability_',ac,all('Bookings'))[0].remaining,0,'per-date override');
 assert.equal(call('availability_',call('accommodation_',next),all('Bookings'))[0].remaining,10);
 for (const end of ['2026-10-24','2026-10-23']) {
-  assert.throws(()=>call('nights_','2026-10-24',end),e=>e.message==='Check out date must be after check in date.');
+  assert.throws(()=>call('nights_','2026-10-24',end),e=>e.message==='The check-out date must be after the check-in date.');
 }
 assert.throws(()=>call('nights_','2026-10-01','2026-12-01'),e=>e.message==='Stay cannot exceed 60 nights.');
 for (const [hours,end,late] of [[8,'04:00','05:00'],[12,'08:00','09:00']]) {

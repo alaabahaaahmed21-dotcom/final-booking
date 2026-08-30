@@ -109,7 +109,7 @@ function iso_(v) {
 }
 function nights_(start,end) {
   const count=(Date.parse(iso_(end))-Date.parse(iso_(start)))/86400000;
-  if (!Number.isInteger(count) || count<1) throw codedError_("VALIDATION_ERROR","Check out date must be after check in date.");
+  if (!Number.isInteger(count) || count<1) throw codedError_("VALIDATION_ERROR","The check-out date must be after the check-in date.");
   if (count>60) throw codedError_("VALIDATION_ERROR","Stay cannot exceed 60 nights.");
   return count;
 }

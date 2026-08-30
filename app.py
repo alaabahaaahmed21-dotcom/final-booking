@@ -49,6 +49,7 @@ def _load_booking_helpers():
         "normalize_guest_name", "normalize_passport_number", "validate_booking",
         "format_currency", "price_transport_service", "vehicle_suggestions",
         "transport_schedule_dates", "transport_end_time_options",
+        "validate_personal_fields", "validate_hotel_fields",
     )
     missing = [name for name in required if not callable(getattr(module, name, None))]
     if missing:
@@ -70,6 +71,8 @@ price_transport_service = _booking_helpers.price_transport_service
 vehicle_suggestions = _booking_helpers.vehicle_suggestions
 transport_schedule_dates = _booking_helpers.transport_schedule_dates
 transport_end_time_options = _booking_helpers.transport_end_time_options
+validate_personal_fields = _booking_helpers.validate_personal_fields
+validate_hotel_fields = _booking_helpers.validate_hotel_fields
 
 
 st.markdown(
@@ -498,13 +501,76 @@ DEFAULTS = {
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
-# Keep widget values across wizard pages and dynamic sections.
-for key in list(st.session_state):
-    if key in DEFAULTS or (key.startswith(("rq_", "tr_")) and not key.endswith("_remove")):
-        st.session_state[key] = st.session_state[key]
+# Model keys above (and rq_/tr_ model keys) are NEVER widget keys. Streamlit
+# may delete a hidden widget; it must never delete the corresponding draft.
+if st.session_state.get("draft_state_version") != "independent-inputs-v1":
+    # Detach any in-progress values left over from the older widget-key model.
+    for key in list(st.session_state):
+        if key in DEFAULTS or (key.startswith(("rq_", "tr_")) and not key.endswith("remove")):
+            st.session_state[key] = copy.deepcopy(st.session_state[key])
+    st.session_state.draft_state_version = "independent-inputs-v1"
+st.session_state.setdefault("validation_attempts", [])
+
+
+def save_visible_inputs():
+    """Capture the current page, including edits submitted with a button click."""
+    for key in st.session_state.get("rendered_input_keys", []):
+        widget_key = "_ui_" + key
+        if widget_key in st.session_state:
+            st.session_state[key] = copy.deepcopy(st.session_state[widget_key])
+
+
+def input_changed(callback=None, callback_args=()):
+    save_visible_inputs()
+    keys = st.session_state.get("rendered_input_keys", [])
+    before = {key: copy.deepcopy(st.session_state.get(key)) for key in keys}
+    if callback:
+        callback(*callback_args)
+    # Normalization and dependent defaults run before widgets render. Mirror
+    # only those changes so another pending field edit is not overwritten.
+    for key in keys:
+        if st.session_state.get(key) != before[key]:
+            st.session_state["_ui_" + key] = copy.deepcopy(st.session_state[key])
+
+
+def field_error(key, container=None):
+    message = page_errors.get(key)
+    if message:
+        (container or st).error(message)
+
+
+def input_field(kind, label, *values, key, container=None, on_change=None, args=(), **kwargs):
+    """Render a temporary widget restored from the independent draft model."""
+    widget_key = "_ui_" + key
+    st.session_state[widget_key] = copy.deepcopy(st.session_state[key])
+    st.session_state.rendered_input_keys.append(key)
+    result = getattr(container or st, kind)(label, *values, key=widget_key,
+        on_change=input_changed, args=(on_change, args), **kwargs)
+    st.session_state[key] = copy.deepcopy(result)
+    field_error(key, container)
+    return result
+
+
+# Callbacks run BEFORE the script restarts and therefore see the previous
+# page's registry. Start a fresh registry only after those callbacks finish.
+st.session_state.rendered_input_keys = []
 
 PAGES = ["Personal", "Hotel", "Transportation", "Review", "Complete"]
 def go_to(page):
+    save_visible_inputs()
+    current = st.session_state.current_page
+    forward = page in PAGES and (current not in PAGES or PAGES.index(page) > PAGES.index(current))
+    retry = page == "Complete" and (st.session_state.pending_submission or st.session_state.last_booking)
+    if forward and not retry:
+        for required_page in PAGES[:PAGES.index(page)]:
+            if required_page not in ("Personal", "Hotel", "Transportation"):
+                continue
+            errors = validate_page(required_page)
+            if required_page not in st.session_state.validation_attempts:
+                st.session_state.validation_attempts.append(required_page)
+            if errors:
+                st.session_state.current_page = required_page
+                return
     st.session_state.current_page = page
 
 def choose_registration(kind):
@@ -547,10 +613,6 @@ def normalize_hotel_state():
 def room_key(room):
     return "rq_" + st.session_state.hotel + "_" + room
 
-def ensure_checkout():
-    if st.session_state.check_out <= st.session_state.check_in:
-        st.session_state.check_out = st.session_state.check_in + timedelta(days=1)
-
 def sync_country():
     country = countries_by_name()[st.session_state.nationality]
     old_prefix = st.session_state.get("last_phone_prefix", DEFAULT_COUNTRY.calling_code)
@@ -590,9 +652,9 @@ def add_transport():
 def ensure_transport_schedule_state(ident):
     """Also migrate an in-progress single-date service without losing its inputs."""
     prefix = f"tr_{ident}_"
-    first = st.session_state[prefix+"date"]
+    first = st.session_state[prefix+"date"] or st.session_state.check_in or date.today()
     defaults = {"date_mode": "One date", "range_start": first,
-                "range_end": max(first, st.session_state.check_out - timedelta(days=1)),
+                "range_end": max(first, (st.session_state.check_out or first) - timedelta(days=1)),
                 "excluded_dates": [], "selected_dates": [], "date_options": [], "pick_date": first}
     for name, value in defaults.items():
         if prefix+name not in st.session_state:
@@ -630,6 +692,8 @@ def sync_transport_window(ident, full_package=False):
     """Keep each package's end time valid; infer overnight travel automatically."""
     prefix = f"tr_{ident}_"
     start, end = st.session_state[prefix+"start"], st.session_state[prefix+"end"]
+    if not isinstance(start, dt_time) or not isinstance(end, dt_time):
+        return
     hours = TRANSPORT_SERVICES[st.session_state[prefix+"service"]]["max_hours"]
     start_minutes = start.hour * 60 + start.minute
     duration = (end.hour * 60 + end.minute - start_minutes) % 1440
@@ -641,9 +705,10 @@ def sync_transport_window(ident, full_package=False):
 
 def transport_template_from_state(ident):
     key = lambda name: st.session_state[f"tr_{ident}_{name}"]
+    clock = lambda value: value.strftime("%H:%M") if isinstance(value, dt_time) else ""
     return {"service": key("service"),
             "direction": key("direction") if TRANSPORT_SERVICES[key("service")]["directions"] else "",
-            "start_time": key("start").strftime("%H:%M"), "end_time": key("end").strftime("%H:%M"),
+            "start_time": clock(key("start")), "end_time": clock(key("end")),
             "ends_next_day": key("next_day"), "persons": key("persons"),
             "vehicles": {name: key(f"v{i}") for i, name in enumerate(TRANSPORTATION) if key(f"v{i}") > 0}}
 
@@ -683,13 +748,51 @@ def booking_from_state():
            "phone": phone if valid else "", "phone_valid": valid,
            "email": (state.individual_email if individual else state.federation_email).strip(),
            "hotel": state.hotel, "meal_plan": state.meal_plan, "rooms": selected_rooms(),
-           "check_in": state.check_in.isoformat(), "check_out": state.check_out.isoformat()}
+           "check_in": state.check_in.isoformat() if state.check_in else "",
+           "check_out": state.check_out.isoformat() if state.check_out else ""}
     try:
         raw["transport_services"] = transport_from_state()
     except (ValueError, TypeError) as exc:
         raw["transport_services"] = []
         raw["transport_schedule_error"] = str(exc)
     return raw
+
+
+def validate_page(page):
+    if page == "Personal":
+        return validate_personal_fields(booking_from_state())
+    if page == "Hotel":
+        return validate_hotel_fields(booking_from_state())
+    errors = {}
+    if page != "Transportation" or not st.session_state.wants_transportation:
+        return errors
+    if not st.session_state.transport_ids:
+        return {"wants_transportation": "Add at least one transportation service, or uncheck transportation."}
+    date_count = 0
+    for order, ident in enumerate(st.session_state.transport_ids, 1):
+        prefix = f"tr_{ident}_"
+        dates = []
+        try:
+            dates = transport_dates_from_state(ident)
+            date_count += len(dates)
+        except (ValueError, TypeError) as exc:
+            errors[prefix+"dates"] = f"Service {order}: {exc}"
+        for name, label in (("start", "start"), ("end", "end")):
+            if not isinstance(st.session_state[prefix+name], dt_time):
+                errors[prefix+name] = f"Please choose a {label} time."
+        try:
+            template = transport_template_from_state(ident)
+            priced = price_transport_service({**template, "date": dates[0] if dates else date.today().isoformat()})
+            if priced["seats"] == 0:
+                errors[prefix+"vehicles"] = "Select at least one vehicle."
+            elif priced["remaining"]:
+                errors[prefix+"vehicles"] = f"Add seats for {priced['remaining']} remaining passengers. Extra seats are allowed."
+        except (ValueError, TypeError, KeyError) as exc:
+            if prefix+"start" not in errors and prefix+"end" not in errors:
+                errors[prefix+"end"] = str(exc)
+    if date_count > MAX_TRANSPORT_SERVICES:
+        errors["wants_transportation"] = f"Choose at most {MAX_TRANSPORT_SERVICES} dated services in one request."
+    return errors
 
 def render_price_box(totals):
     st.markdown(
@@ -770,36 +873,34 @@ if st.session_state.current_page == "Registration":
     st.stop()
 render_navigation()
 page = st.session_state.current_page
+page_errors = validate_page(page) if page in st.session_state.validation_attempts else {}
+if page_errors:
+    st.error("Please complete or correct the highlighted fields on this page before continuing.")
 if page == "Personal":
     section_title("📝", "Registration Details")
     st.caption("Registration type: " + st.session_state.registration_type)
     if st.session_state.registration_type == "Individual":
-        st.text_input("Full Name (CAPITAL LETTERS) *", key="guest_name", on_change=normalize_name, max_chars=150)
+        input_field("text_input", "Full Name (CAPITAL LETTERS) *", key="guest_name", on_change=normalize_name, max_chars=150)
         left, right = st.columns(2)
-        left.text_input("Passport Number *", key="passport_number", on_change=normalize_passport, max_chars=20)
-        right.date_input("Date of Birth *", key="date_of_birth", min_value=date(1900,1,1), max_value=date.today(), format="YYYY-MM-DD")
-        st.selectbox("Nationality *", [c.name for c in countries()], key="nationality", on_change=sync_country)
-        st.text_input("Phone Number (including country code) *", key="individual_phone", placeholder="+201012345678")
-        st.text_input("Email *", key="individual_email")
-        phone_value = st.session_state.individual_phone
+        input_field("text_input", "Passport Number *", key="passport_number", container=left, on_change=normalize_passport, max_chars=20)
+        input_field("date_input", "Date of Birth *", key="date_of_birth", container=right, min_value=date(1900,1,1), max_value=date.today(), format="YYYY-MM-DD")
+        input_field("selectbox", "Nationality *", [c.name for c in countries()], key="nationality", on_change=sync_country)
+        input_field("text_input", "Phone Number (including country code) *", key="individual_phone", placeholder="+201012345678")
+        input_field("text_input", "Email *", key="individual_email")
     else:
-        st.text_input("Federation Name *", key="federation_name", max_chars=150)
-        st.selectbox("Federation Country *", [c.name for c in countries()],
+        input_field("text_input", "Federation Name *", key="federation_name", max_chars=150)
+        input_field("selectbox", "Federation Country *", [c.name for c in countries()],
                      key="federation_country", index=None, placeholder="Select the federation country")
-        st.text_input("Federation Email *", key="federation_email")
-        st.text_input("Federation Phone (including country code) *", key="federation_phone", placeholder="+201012345678")
-        phone_value = st.session_state.federation_phone
+        input_field("text_input", "Federation Email *", key="federation_email")
+        input_field("text_input", "Federation Phone (including country code) *", key="federation_phone", placeholder="+201012345678")
     raw = booking_from_state()
-    if len(phone_value.strip()) > 5:
-        if raw["phone_valid"]:
-            st.caption(f"Phone: {raw['phone']}")
-        else:
-            st.error("Please enter a valid phone number including the country code.")
+    if raw["phone_valid"]:
+        st.caption(f"Phone: {raw['phone']}")
     render_step_navigation(back="Registration", next_page="Hotel")
 
 elif page == "Hotel":
     section_title("🏨", "Hotel & Rooms", "Choose your rooms and stay dates.")
-    st.selectbox("Select Hotel *", list(HOTELS), key="hotel", on_change=normalize_hotel_state)
+    input_field("selectbox", "Select Hotel *", list(HOTELS), key="hotel", on_change=normalize_hotel_state)
     info = HOTELS[st.session_state.hotel]
     with st.expander("🏨 Hotel Details"):
         st.write(f"Stars: {info['stars']} · Distance to Arena: {info['distance_to_arena']}")
@@ -808,19 +909,20 @@ elif page == "Hotel":
             st.markdown(f"[Hotel website]({info['website']})")
         if info.get("notes"):
             st.write(info["notes"])
-    st.radio("Meal Plan *", list(info["rates"]), key="meal_plan", horizontal=True, on_change=normalize_hotel_state)
+    input_field("radio", "Meal Plan *", list(info["rates"]), key="meal_plan", horizontal=True, on_change=normalize_hotel_state)
     rates = info["rates"][st.session_state.meal_plan]
     if st.session_state.registration_type == "Individual":
-        st.selectbox("Room Type *", list(rates), key="room_type")
+        input_field("selectbox", "Room Type *", list(rates), key="room_type")
         st.info(f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]}")
     else:
         for room, rate in rates.items():
-            st.number_input(f"{room} — {format_currency(rate)} / room / night", min_value=0,
+            input_field("number_input", f"{room} — {format_currency(rate)} / room / night", min_value=0,
                             max_value=5000, step=1, key=room_key(room))
         st.caption("Guests (automatic): " + str(sum(r["quantity"] * ROOM_OCCUPANCY[r["room_type"]] for r in selected_rooms())))
+    field_error("rooms")
     left, right = st.columns(2)
-    left.date_input("Check-in Date *", key="check_in", on_change=ensure_checkout, format="YYYY-MM-DD")
-    right.date_input("Check-out Date *", key="check_out", format="YYYY-MM-DD")
+    input_field("date_input", "Check-in Date *", key="check_in", container=left, format="YYYY-MM-DD")
+    input_field("date_input", "Check-out Date *", key="check_out", container=right, format="YYYY-MM-DD")
     raw = booking_from_state()
     try:
         totals = calculate_booking_totals({**raw, "transport_services": []})
@@ -839,7 +941,7 @@ elif page == "Hotel":
 
 elif page == "Transportation":
     section_title("🚐", "Transportation", "Whole-vehicle prices in EUR. All times are Cairo local time.")
-    st.checkbox("I need transportation", key="wants_transportation")
+    input_field("checkbox", "I need transportation", key="wants_transportation")
     if st.session_state.wants_transportation:
         if not st.session_state.transport_ids:
             add_transport()
@@ -847,7 +949,7 @@ elif page == "Transportation":
             ensure_transport_schedule_state(ident)
             prefix = f"tr_{ident}_"
             with st.expander(f"Service {order}", expanded=True):
-                st.selectbox("Service Type", list(TRANSPORT_SERVICES), key=prefix+"service",
+                input_field("selectbox", "Service Type", list(TRANSPORT_SERVICES), key=prefix+"service",
                              format_func=lambda v: TRANSPORT_SERVICES[v]["label"],
                              on_change=sync_transport_window, args=(ident, True))
                 service = st.session_state[prefix+"service"]
@@ -855,54 +957,58 @@ elif page == "Transportation":
                 if directions:
                     if st.session_state[prefix+"direction"] not in directions:
                         st.session_state[prefix+"direction"] = directions[0]
-                    st.selectbox("Direction", directions, key=prefix+"direction")
-                st.selectbox("When do you need this service?", ["One date", "Date range", "Specific dates"],
+                    input_field("selectbox", "Direction", directions, key=prefix+"direction")
+                input_field("selectbox", "When do you need this service?", ["One date", "Date range", "Specific dates"],
                              key=prefix+"date_mode",
                              format_func=lambda v: {"One date":"One date", "Date range":"Repeat daily — from / to", "Specific dates":"Choose specific dates"}[v])
                 mode = st.session_state[prefix+"date_mode"]
                 if mode == "One date":
-                    st.date_input("Service Date", key=prefix+"date", format="YYYY-MM-DD")
+                    input_field("date_input", "Service Date", key=prefix+"date", format="YYYY-MM-DD")
                 elif mode == "Date range":
                     a, b = st.columns(2)
-                    a.date_input("First service date", key=prefix+"range_start", format="YYYY-MM-DD")
-                    b.date_input("Last service date", key=prefix+"range_end", format="YYYY-MM-DD")
+                    input_field("date_input", "First service date", key=prefix+"range_start", container=a, format="YYYY-MM-DD")
+                    input_field("date_input", "Last service date", key=prefix+"range_end", container=b, format="YYYY-MM-DD")
                     st.caption("Both dates are included. The same vehicles and times apply to every selected day.")
                     try:
                         options = [date.fromisoformat(value) for value in transport_schedule_dates("Date range",
                             start_date=st.session_state[prefix+"range_start"], end_date=st.session_state[prefix+"range_end"])]
                         st.session_state[prefix+"excluded_dates"] = [value for value in st.session_state[prefix+"excluded_dates"] if value in options]
-                        st.multiselect("Skip dates (optional)", options, key=prefix+"excluded_dates",
+                        input_field("multiselect", "Skip dates (optional)", options, key=prefix+"excluded_dates",
                                        format_func=lambda v: v.strftime("%a, %d %b %Y"))
                     except (ValueError, TypeError):
                         pass  # The shared validation below displays the exact problem.
                 else:
-                    st.date_input("Pick a date", key=prefix+"pick_date", format="YYYY-MM-DD")
+                    input_field("date_input", "Pick a date", key=prefix+"pick_date", format="YYYY-MM-DD")
                     st.button("＋ Add selected date", key="action_add_date_"+ident,
                               on_click=add_selected_transport_date, args=(ident,),
                               disabled=len(st.session_state[prefix+"selected_dates"]) >= MAX_TRANSPORT_SERVICES)
-                    st.multiselect("Selected service dates", st.session_state[prefix+"date_options"],
+                    input_field("multiselect", "Selected service dates", st.session_state[prefix+"date_options"],
                                    key=prefix+"selected_dates", format_func=lambda v: v.strftime("%a, %d %b %Y"))
                     st.caption("Add each date once. Remove a date using its ×. The same vehicles and times apply to all selected dates.")
+                field_error(prefix+"dates")
                 sync_transport_window(ident)
                 a, b = st.columns(2)
-                a.time_input("From", key=prefix+"start", on_change=sync_transport_window, args=(ident,))
+                input_field("time_input", "From", key=prefix+"start", container=a, on_change=sync_transport_window, args=(ident,))
                 hours = TRANSPORT_SERVICES[service]["max_hours"]
                 start = st.session_state[prefix+"start"]
-                if hours:
+                if hours and isinstance(start, dt_time):
+                    current_end = st.session_state[prefix+"end"]
                     end_options = [dt_time.fromisoformat(value) for value in transport_end_time_options(
-                        start.strftime("%H:%M"), hours, st.session_state[prefix+"end"].strftime("%H:%M"))]
-                    b.selectbox(f"To (up to {hours} hours)", end_options, key=prefix+"end",
+                        start.strftime("%H:%M"), hours, current_end.strftime("%H:%M") if current_end else None)]
+                    input_field("selectbox", f"To (up to {hours} hours)", end_options, key=prefix+"end", container=b,
+                                on_change=sync_transport_window, args=(ident,), index=None,
                                 format_func=lambda value: value.strftime("%H:%M") + (" (next day)" if value < start else ""))
                     st.caption(f"End times are limited to {hours} hours after departure. The selected package price applies even if you choose fewer hours.")
                 else:
-                    b.time_input("To", key=prefix+"end", on_change=sync_transport_window, args=(ident,))
+                    input_field("time_input", "To", key=prefix+"end", container=b, on_change=sync_transport_window, args=(ident,))
                 if st.session_state[prefix+"next_day"]:
                     st.caption("Ends on the next day (after midnight). This is detected automatically.")
-                st.number_input("Passengers to transport", min_value=1, max_value=5000, key=prefix+"persons")
+                input_field("number_input", "Passengers to transport", min_value=1, max_value=5000, key=prefix+"persons")
                 st.caption("Select the quantity of each vehicle you need:")
                 for i, (name, vehicle) in enumerate(TRANSPORTATION.items()):
-                    st.number_input(f"{name} — {format_currency(vehicle['prices_eur'][service])} / vehicle",
+                    input_field("number_input", f"{name} — {format_currency(vehicle['prices_eur'][service])} / vehicle",
                                     min_value=0, max_value=100, step=1, key=prefix+f"v{i}")
+                field_error(prefix+"vehicles")
                 try:
                     dates = transport_dates_from_state(ident)
                     priced = price_transport_service({**transport_template_from_state(ident), "date": dates[0]})
