@@ -29,8 +29,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-09-01-v5.5":
-    st.error("This app needs the matching v5.5 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-09-01-v5.5.1":
+    st.error("This app needs the matching v5.5.1 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
@@ -38,7 +38,7 @@ try:
                         request_edit_code, verify_edit_code, load_request, retry_request_documents,
                         process_saved_documents)
 except ImportError:
-    st.error("Upload the matching v5.5 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5.5.1 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -1074,13 +1074,30 @@ def show_summary(raw):
         st.write(f"Nights: {totals['nights']} · Guests: {totals['guests']}")
         if totals["transport_services"]:
             st.subheader("Transportation")
-        for i, service in enumerate(totals["transport_services"], 1):
-            next_day = " (+1 day)" if service["ends_next_day"] else ""
-            st.write(f"{i}. {service['date']} · {service['service']} · {service.get('direction', '')}")
-            st.write(f"{service['start_time']}–{service['end_time']}{next_day} (Cairo time)")
-            st.write(f"Passengers: {service['persons']} · Seats: {service['seats']}")
-            for line in service["vehicle_lines"]:
-                st.write(f"{line['vehicle']} × {line['quantity']} · {format_currency(line['total_eur'])}")
+            transport_rows = []
+            for i, service in enumerate(totals["transport_services"], 1):
+                next_day = " (+1)" if service["ends_next_day"] else ""
+                vehicles = "; ".join(
+                    f"{line['vehicle']} × {line['quantity']}" for line in service["vehicle_lines"]
+                )
+                transport_rows.append({
+                    "#": i,
+                    "Date": service["date"],
+                    "Service": service["service"],
+                    "Direction": service.get("direction", "") or "—",
+                    "Time": f"{service['start_time']}–{service['end_time']}{next_day}",
+                    "Passengers": service["persons"],
+                    "Seats": service["seats"],
+                    "Vehicle(s)": vehicles or "—",
+                    "Total": format_currency(service["total_eur"]),
+                })
+            st.dataframe(
+                transport_rows,
+                hide_index=True,
+                use_container_width=True,
+                height=min(420, 38 + 35 * len(transport_rows)),
+            )
+            st.caption("Transportation times are Cairo local time.")
         render_price_box(totals)
     except (ValueError, TypeError, KeyError) as exc:
         st.info(str(exc))
@@ -1487,7 +1504,7 @@ elif page == "Complete":
         if saved.get("customer_email_sent"):
             st.success("The PDF was emailed to " + saved["email"])
         elif saved.get("invoice_created") and saved.get("document_status") == "Ready":
-            st.info("Your protected PDF is saved. The confirmation email is queued and will be sent automatically.")
+            st.info("Your protected PDF is saved. The confirmation email is queued for automatic delivery (normally on the next email-queue run).")
         else:
             st.info("Your request is saved. Email delivery is pending.")
         needs_document_retry = (
