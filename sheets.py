@@ -37,6 +37,7 @@ def _verification_code(token: str, booking: dict) -> str:
     digest = hmac.new(token.encode(), message.encode(), hashlib.sha256).hexdigest().upper()[:16]
     return "-".join(digest[i:i+4] for i in range(0,16,4))
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _check_version(url: str) -> dict | None:
     try:
         response = requests.get(url, timeout=(10, 25))
@@ -53,9 +54,14 @@ def _post(action: str, body: dict, attempts: int = 3) -> dict:
     if not backend_is_configured():
         return {"ok": False, "saved": False, "error": "Set GOOGLE_APPS_SCRIPT_URL and BOOKING_API_TOKEN in Streamlit Secrets."}
     url = _url()
-    problem = _check_version(url)
-    if problem:
-        return {"ok": False, "saved": False, **problem}
+    # Availability is a high-frequency read. The POST itself already carries
+    # schema_version and Apps Script rejects mismatches before dispatching the
+    # action, so an extra GET version probe would only double network latency.
+    # Keep the friendly preflight for lower-frequency write/edit operations.
+    if action != "check_availability":
+        problem = _check_version(url)
+        if problem:
+            return {"ok": False, "saved": False, **problem}
     payload = {"schema_version": APP_SCHEMA_VERSION, "action": action,
                "token": _secret("BOOKING_API_TOKEN"), **body}
     for attempt in range(attempts):
