@@ -28,15 +28,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-08-31-v5.3":
-    st.error("This app needs the matching v5.3 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-08-31-v5.4":
+    st.error("This app needs the matching v5.4 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
     from sheets import (backend_is_configured, save_to_google_sheets, check_availability, check_all_availability,
-                        request_edit_code, verify_edit_code, load_request, retry_request_documents)
+                        request_edit_code, verify_edit_code, load_request, retry_request_documents,
+                        process_saved_documents)
 except ImportError:
-    st.error("Upload the matching v5.3 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5.4 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -493,6 +494,15 @@ def first_choices():
 
 DEFAULT_HOTEL, DEFAULT_MEAL, DEFAULT_ROOM = first_choices()
 DEFAULT_COUNTRY = country_for_code(DEFAULT_COUNTRY_CODE)
+
+# A brand-new Streamlit browser session must never inherit another request's
+# draft. Normal widget reruns keep this flag, while closing the app/tab and
+# returning later creates a new session and starts clean. No personal fields
+# are stored in st.cache_data.
+if not st.session_state.get("_fresh_browser_session_initialized"):
+    st.session_state.clear()
+    st.session_state["_fresh_browser_session_initialized"] = True
+
 DEFAULTS = {
     "current_page": "Registration", "registration_type": "",
     "guest_name": "", "date_of_birth": None, "passport_number": "",
@@ -1002,8 +1012,9 @@ def show_summary(raw):
         st.info(str(exc))
 
 def attempt_save(record):
+    """Reserve/save the request first; documents are processed after success is visible."""
     st.session_state.pending_submission = record
-    with st.spinner("Saving your request..."):
+    with st.spinner("Confirming and saving your request..."):
         result = save_to_google_sheets(record, edit_context=st.session_state.edit_context) if st.session_state.edit_context else save_to_google_sheets(record)
     if not result.saved:
         st.session_state.pending_error = result.message
@@ -1013,10 +1024,37 @@ def attempt_save(record):
         st.rerun()
     booking = {**record, **result.data.get("booking", {}), **result.data}
     st.session_state.last_booking = booking
-    st.session_state.submitted_record = record
+    st.session_state.submitted_record = booking
     st.session_state.pending_submission = None
     st.session_state.pending_error = ""
+    # Each invoice/revision gets one automatic document attempt on the success page.
+    st.session_state.documents_attempted_for_invoice = ""
     st.rerun()
+
+
+def process_completion_documents(saved):
+    """Process PDF/Drive/email after the durable reservation is already shown as saved."""
+    invoice_no = str(saved.get("invoice_no", ""))
+    if not invoice_no or (saved.get("invoice_created") and saved.get("customer_email_sent")):
+        return saved
+    if st.session_state.get("documents_attempted_for_invoice") == invoice_no:
+        return saved
+    st.session_state.documents_attempted_for_invoice = invoice_no
+    edit_token = (st.session_state.edit_context or {}).get("edit_token", "")
+    with st.status("Preparing your one-page PDF and email...", expanded=False) as status:
+        result = process_saved_documents(saved, edit_token=edit_token, force_check=bool(st.session_state.get("document_force_check")))
+        if result.saved:
+            updated = {**saved, **result.data.get("booking", {}), **result.data}
+            st.session_state.last_booking = updated
+            st.session_state.submitted_record = updated
+            st.session_state.document_force_check = False
+            if updated.get("invoice_created") and updated.get("customer_email_sent"):
+                status.update(label="PDF saved and email sent.", state="complete", expanded=False)
+            else:
+                status.update(label="Request saved; PDF/email can be retried safely.", state="complete", expanded=False)
+            return updated
+        status.update(label="Request saved; PDF/email can be retried safely.", state="error", expanded=False)
+    return saved
 
 
 def open_request_manager():
@@ -1345,7 +1383,7 @@ elif page == "Transportation":
             st.write(f"All transportation: {len(services)} dated service(s) · {format_currency(total)}")
         except (ValueError, TypeError, KeyError) as exc:
             st.warning(str(exc))
-        st.caption("Prices include 14% VAT. Each transfer price is for one direction; daily hire is charged at the selected package price.")
+        st.caption("Each transfer price is for one direction; daily hire is charged at the selected package price.")
     render_step_navigation(back="Hotel", next_page="Review")
 
 elif page == "Review":
@@ -1363,10 +1401,15 @@ elif page == "Complete":
     if st.session_state.last_booking:
         saved = st.session_state.last_booking
         verb = "updated" if int(saved.get("revision", 1)) > 1 else "received"
+        # This appears immediately after the durable reservation/save response.
         st.success(f"Your booking request has been {verb} successfully. Request ID: {saved['booking_id']}")
         st.code(saved["booking_id"], language=None)
         st.info(f"Invoice / summary number: {saved.get('invoice_no', '-')}")
         st.caption(f"Revision: {saved.get('revision', 1)}. Keep your Request ID to view or edit this same request later.")
+
+        # PDF/Drive/email no longer delay the reservation confirmation above.
+        saved = process_completion_documents(saved)
+
         if saved.get("_invoice_pdf_bytes"):
             st.download_button("Download PDF", data=saved["_invoice_pdf_bytes"],
                                file_name=saved["invoice_no"]+".pdf", mime="application/pdf", use_container_width=True)
@@ -1380,7 +1423,9 @@ elif page == "Complete":
             st.info("Your request is saved. Email delivery is pending.")
         if not saved.get("invoice_created") or not saved.get("customer_email_sent") or saved.get("invoice_read_error"):
             if st.button("Retry PDF / email", use_container_width=True):
-                attempt_save(st.session_state.submitted_record)
+                st.session_state.documents_attempted_for_invoice = ""
+                st.session_state.document_force_check = True
+                st.rerun()
         st.button("View / edit this request", key="complete_edit", use_container_width=True, on_click=open_request_manager)
         if st.button("Start a new request", use_container_width=True):
             st.session_state.clear()
