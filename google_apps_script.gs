@@ -4,7 +4,7 @@
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-08-31-v5";
+const VERSION = "2026-08-31-v5.4";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
@@ -98,14 +98,44 @@ function doPost(e) {
         return {ok:true,availability:availability_(b,rows)};
       }));
     }
+    if (req.action === "check_all_availability") {
+      return json_(locked_(function() {
+        const checkIn=iso_(req.check_in), checkOut=iso_(req.check_out);
+        nights_(checkIn,checkOut);
+        let rows=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS));
+        if (req.edit_token) {
+          const row=authorizedEdit_(req.booking_id,req.edit_token,rows);
+          rows=rows.filter(r=>r._row!==row._row);
+        }
+        const inventory=inventory_(), byHotel={};
+        Object.keys(ROOM_INVENTORY_CAPACITY).forEach(function(hotel) {
+          const rooms=Object.keys(ROOM_INVENTORY_CAPACITY[hotel]);
+          const probe={hotel:hotel,check_in:checkIn,check_out:checkOut,
+            rooms:rooms.map(room=>({room_type:room,quantity:1}))};
+          byHotel[hotel]={};
+          availability_(probe,rows,inventory).forEach(function(item) {
+            byHotel[hotel][item.room_type]=item.remaining;
+          });
+        });
+        return {ok:true,availability_by_hotel:byHotel};
+      }));
+    }
     if (req.action === "create_booking") return json_(createBooking_(req.booking || {}, req.invoice || {}));
     if (req.action === "request_edit_code") return json_(requestEditCode_(req.booking_id,req.email));
     if (req.action === "verify_edit_code") return json_(verifyEditCode_(req.booking_id,req.email,req.code));
     if (req.action === "load_request") return json_(loadRequest_(req.booking_id,req.edit_token));
     if (req.action === "amend_booking") return json_(amendBooking_(req.booking || {},req.invoice || {},req));
+    if (req.action === "process_documents") {
+      const id=requestId_(req.booking_id);
+      const row=locked_(function() {
+        return find_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),"Booking ID",id);
+      });
+      if (!row || !row["Booking JSON"]) throw codedError_("SERVER_ERROR","Saved request could not be located.");
+      return json_(processDocuments_(JSON.parse(row["Booking JSON"]),req.invoice || {},truthy_(req.force_check)));
+    }
     if (req.action === "retry_documents") {
       const saved=loadRequest_(req.booking_id,req.edit_token);
-      return json_(processDocuments_(saved.booking,req.invoice || {}));
+      return json_(processDocuments_(saved.booking,req.invoice || {},true));
     }
     if (req.action === "check_duplicate") {
       return json_({ok:true,exists:passportExists_(rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)),req.passport_number)});
@@ -288,8 +318,8 @@ function inventory_() {
   });
   return index;
 }
-function availability_(b,bookings) {
-  const index=inventory_(), dates=dates_(b.check_in,b.check_out);
+function availability_(b,bookings,inventoryIndex) {
+  const index=inventoryIndex || inventory_(), dates=dates_(b.check_in,b.check_out);
   const used={};
   b.rooms.forEach(r=>used[r.room_type]=Object.fromEntries(dates.map(d=>[d,0])));
   bookings.forEach(function(row) {
@@ -347,11 +377,14 @@ function createBooking_(raw,invoice) {
     SpreadsheetApp.flush();
     return {booking:b,row:data};
   });
-  try { return processDocuments_(saved.booking,invoice); }
-  catch(err) {
-    // A document failure must never report a durable reservation as unsaved.
-    return result_(saved.row,"Request saved; documents are pending.");
+  // v5.4 fast completion: the current Streamlit client sends no PDF in this
+  // first call, so the durable reservation returns immediately. Legacy callers
+  // that still supply a PDF keep the previous all-in-one behavior.
+  if (invoice && invoice.base64) {
+    try { return processDocuments_(saved.booking,invoice); }
+    catch(err) { return result_(saved.row,"Request saved; documents are pending.",false); }
   }
+  return result_(saved.row,"Request saved; PDF/email processing is pending.",false);
 }
 function bookingColumns_(b) {
   return {"Booking ID":b.booking_id,"Booking Date":b.booking_date,"Registration Type":b.registration_type,
@@ -492,10 +525,13 @@ function amendBooking_(raw,invoice,req) {
     writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush();
     return {booking:b,row:Object.assign(row,changes)};
   });
-  try { return processDocuments_(saved.booking,invoice); }
-  catch(e) { return result_(saved.row,"The changes were saved. PDF/email processing is pending."); }
+  if (invoice && invoice.base64) {
+    try { return processDocuments_(saved.booking,invoice); }
+    catch(e) { return result_(saved.row,"The changes were saved. PDF/email processing is pending.",false); }
+  }
+  return result_(saved.row,"The changes were saved. PDF/email processing is pending.",false);
 }
-function processDocuments_(b,payload) {
+function processDocuments_(b,payload,forceCheck) {
   const lease=locked_(function() {
     const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), row=find_(ctx,"Booking ID",b.booking_id);
     if (!row) throw codedError_("SERVER_ERROR","Saved request could not be located.");
@@ -504,38 +540,63 @@ function processDocuments_(b,payload) {
     const started=Date.parse(String(row["Processing Started"]||""));
     if (row["Document Status"]==="Processing" && started && Date.now()-started<10*60*1000)
       return {done:true,row:row};
-    if (row["Invoice File ID"]) {
+    // Normal completion avoids another Drive download. Explicit retry from the
+    // request manager can force a storage check so a deleted/corrupt copy is
+    // repairable without creating another booking revision.
+    if (row["Invoice File ID"] && truthy_(row["Customer Email Sent"])) {
+      if (!forceCheck) return {done:true,row:row};
       try { DriveApp.getFileById(row["Invoice File ID"]).getBlob().getBytes(); }
       catch(e) {
         Object.assign(row,{"Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"",
           "Customer Email Sent":false,"Email Sent At":""});
       }
+      if (row["Invoice File ID"] && truthy_(row["Customer Email Sent"])) return {done:true,row:row};
     }
-    if (row["Invoice File ID"] && truthy_(row["Customer Email Sent"])) return {done:true,row:row};
     const token=Utilities.getUuid();
-    Object.assign(row,{"Document Status":"Processing","Processing Started":new Date().toISOString(),"Document Lease":token});
-    writeRow_(ctx,row._row,row,row);
-    SpreadsheetApp.flush(); return {done:false,row:row,token:token};
+    const processing={"Document Status":"Processing","Processing Started":new Date().toISOString(),"Document Lease":token,
+      "Invoice File ID":row["Invoice File ID"]||"","Invoice URL":row["Invoice URL"]||"","Invoice SHA-256":row["Invoice SHA-256"]||"",
+      "Customer Email Sent":truthy_(row["Customer Email Sent"]),"Email Sent At":row["Email Sent At"]||""};
+    writeRow_(ctx,row._row,processing,row);
+    SpreadsheetApp.flush();
+    return {done:false,row:Object.assign(row,processing),token:token};
   });
   if (lease.done) {
-    // Repair the secondary invoice log if a prior execution stopped after email.
     if (lease.row["Document Status"]!=="Processing") {
       try { locked_(function() { invoiceLog_(b,lease.row); }); } catch(e) { /* Main row remains saved. */ }
     }
-    return result_(lease.row);
+    return result_(lease.row,"",false);
   }
-  let row=lease.row, errors=[];
+
+  let row=lease.row, errors=[], changes={}, attachment=null;
   try {
     if (!row["Invoice File ID"]) {
       const file=saveInvoicePdf_(payload,b);
-      row=updateDocument_(b,lease.token,{"Invoice File ID":file.id,"Invoice URL":file.url,"Invoice SHA-256":file.sha256});
+      changes["Invoice File ID"]=file.id;
+      changes["Invoice URL"]=file.url;
+      changes["Invoice SHA-256"]=file.sha256;
+      // New PDFs are emailed from the same verified blob that was written to
+      // Drive; do not download that file again immediately after uploading it.
+      attachment=file.blob;
+      Object.assign(row,changes);
     }
     if (!truthy_(row["Customer Email Sent"])) {
       if (MailApp.getRemainingDailyQuota()<1) throw Error("Daily email quota reached; delivery will be retried.");
       const name=b.federation_name || b.guest_name;
-      const attachment=DriveApp.getFileById(row["Invoice File ID"]).getBlob();
-      if (!equal_(digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,attachment.getBytes())),row["Invoice SHA-256"]))
-        throw Error("Stored PDF integrity check failed. Contact the organizer before sending.");
+      if (!attachment) {
+        attachment=DriveApp.getFileById(row["Invoice File ID"]).getBlob();
+      }
+      // Preserve the PDF exactly as generated, including its encryption/protection.
+      // Validate the raw bytes first, then wrap those SAME bytes in a clean
+      // application/pdf attachment. No PDF parsing, conversion or re-generation
+      // happens here, so password/encryption settings remain untouched.
+      const attachmentBytes=attachment.getBytes();
+      const attachmentMagic=attachmentBytes.slice(0,5).map(v=>String.fromCharCode((v+256)%256)).join("");
+      if (!attachmentBytes.length || attachmentBytes.length>5*1024*1024 || attachmentMagic!=="%PDF-")
+        throw Error("Stored PDF is invalid. Retry PDF/email from the application.");
+      const attachmentSha=digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,attachmentBytes));
+      if (!row["Invoice SHA-256"] || !equal_(attachmentSha,row["Invoice SHA-256"]))
+        throw Error("Stored PDF integrity check failed. Retry PDF/email from the application.");
+      const mailAttachment=Utilities.newBlob(attachmentBytes,"application/pdf",b.invoice_no+".pdf");
       MailApp.sendEmail({
         to:b.email,subject:b.invoice_no+" - ITKF Booking Request",
         body:"Dear "+name+",\n\nYour booking request "+((b.revision||1)>1?"has been updated.":"has been received successfully.")+"\nRequest ID: "+b.booking_id+
@@ -545,33 +606,84 @@ function processDocuments_(b,payload) {
           "\nYou will receive a verification code. Do not submit a new request for the same booking."+
           (optionalProp_("PUBLIC_APP_URL")?"\nApplication: "+optionalProp_("PUBLIC_APP_URL"):""),
         name:optionalProp_("COMPANY_NAME") || "Egyptian Traditional Karate Federation",
-        attachments:[attachment.setName(b.invoice_no+".pdf")]
+        attachments:[mailAttachment]
       });
-      row=updateDocument_(b,lease.token,{"Customer Email Sent":true,"Email Sent At":new Date().toISOString()});
+      changes["Customer Email Sent"]=true;
+      changes["Email Sent At"]=new Date().toISOString();
     }
   } catch(e) { errors.push(safeError_(e)); }
-  row=updateDocument_(b,lease.token,{"Document Status":errors.length?"Pending":"Ready","Processing Started":"","Document Lease":"","Last Error":errors.join(" | ")});
+
+  Object.assign(changes,{"Document Status":errors.length?"Pending":"Ready","Processing Started":"","Document Lease":"","Last Error":errors.join(" | ")});
+  row=updateDocument_(b,lease.token,changes);
   try { locked_(function() { invoiceLog_(b,row); }); } catch(e) { /* Booking row remains the authoritative record. */ }
-  return result_(row);
+  // The Streamlit client already has the exact generated PDF bytes. Returning
+  // them again from Drive would add a full extra download to the submit path.
+  return result_(row,"",false);
 }
 function saveInvoicePdf_(payload,b) {
   const folder=DriveApp.getFolderById(optionalProp_("INVOICE_FOLDER_ID") || prop_("DRIVE_FOLDER_ID"));
-  // Recover a file written immediately before a prior execution timed out.
-  const matches=folder.getFilesByName(b.invoice_no+".pdf");
-  if (matches.hasNext()) {
-    const file=matches.next();
-    return {id:file.getId(),url:file.getUrl(),sha256:digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,file.getBlob().getBytes()))};
+
+  // Validate the PDF supplied by the application first. These are the exact
+  // protected/encrypted PDF bytes generated by ReportLab; Apps Script must not
+  // alter them.
+  let payloadBytes=null, payloadDigest="";
+  if (payload && payload.base64) {
+    if (payload.mime_type!=="application/pdf" || payload.filename!==b.invoice_no+".pdf")
+      throw Error("Invalid PDF metadata.");
+    if (!equal_(payload.verification_code,b.invoice_verification_code))
+      throw Error("PDF verification does not match this request.");
+    payloadBytes=Utilities.base64Decode(payload.base64);
+    const payloadMagic=payloadBytes.slice(0,5).map(v=>String.fromCharCode((v+256)%256)).join("");
+    if (!payloadBytes.length || payloadBytes.length>5*1024*1024 || payloadMagic!=="%PDF-")
+      throw Error("Invalid PDF.");
+    payloadDigest=digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,payloadBytes));
+    if (!payload.sha256 || !equal_(payloadDigest,payload.sha256))
+      throw Error("PDF integrity check failed.");
   }
-  if (!payload.base64 || payload.mime_type!=="application/pdf" || payload.filename!==b.invoice_no+".pdf")
+
+  // Recover a file written immediately before a prior execution timed out,
+  // BUT only when its bytes are verified. Previously any same-name Drive file
+  // could be reused, which could resend a partial/stale PDF from an interrupted
+  // attempt.
+  const matches=folder.getFilesByName(b.invoice_no+".pdf");
+  while (matches.hasNext()) {
+    const file=matches.next();
+    try {
+      const storedBytes=file.getBlob().getBytes();
+      const storedMagic=storedBytes.slice(0,5).map(v=>String.fromCharCode((v+256)%256)).join("");
+      const storedDigest=digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,storedBytes));
+      const structurallyValid=storedBytes.length>0 && storedBytes.length<=5*1024*1024 && storedMagic==="%PDF-";
+      const matchesPayload=!payloadDigest || equal_(storedDigest,payloadDigest);
+      if (structurallyValid && matchesPayload) {
+        const verifiedBlob=Utilities.newBlob(storedBytes,"application/pdf",b.invoice_no+".pdf");
+        return {id:file.getId(),url:file.getUrl(),sha256:storedDigest,blob:verifiedBlob};
+      }
+      // Do not reuse a corrupt/stale same-name file. Keep it out of the active
+      // path and recreate the invoice from the verified application bytes.
+      file.setTrashed(true);
+    } catch(e) {
+      try { file.setTrashed(true); } catch(ignore) {}
+    }
+  }
+
+  if (!payloadBytes)
     throw Error("PDF generation is pending. Retry PDF from the application.");
-  if (!equal_(payload.verification_code,b.invoice_verification_code)) throw Error("PDF verification does not match this request.");
-  const bytes=Utilities.base64Decode(payload.base64);
-  const magic=bytes.slice(0,5).map(v=>String.fromCharCode((v+256)%256)).join("");
-  if (!bytes.length || bytes.length>5*1024*1024 || magic!=="%PDF-") throw Error("Invalid PDF.");
-  const digest=digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes));
-  if (!equal_(digest,payload.sha256)) throw Error("PDF integrity check failed.");
-  const file=folder.createFile(Utilities.newBlob(bytes,"application/pdf",b.invoice_no+".pdf"));
-  return {id:file.getId(),url:file.getUrl(),sha256:digest};
+
+  // Write the exact original bytes; encryption/protection is preserved.
+  const blob=Utilities.newBlob(payloadBytes,"application/pdf",b.invoice_no+".pdf");
+  const file=folder.createFile(blob);
+
+  // Read back once after creation and verify byte-for-byte integrity before the
+  // file is eligible for email delivery. This is intentionally only on a NEW
+  // PDF, not an extra read on every successful submission.
+  const storedBytes=file.getBlob().getBytes();
+  const storedDigest=digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,storedBytes));
+  if (!equal_(storedDigest,payloadDigest)) {
+    file.setTrashed(true);
+    throw Error("Drive PDF integrity check failed. Retry PDF/email from the application.");
+  }
+  const verifiedBlob=Utilities.newBlob(storedBytes,"application/pdf",b.invoice_no+".pdf");
+  return {id:file.getId(),url:file.getUrl(),sha256:storedDigest,blob:verifiedBlob};
 }
 function updateBooking_(id,changes) {
   return locked_(function() {
@@ -599,14 +711,14 @@ function invoiceLog_(b,row) {
     "Revision":b.revision||1,"Updated At":b.updated_at||b.booking_date};
   writeRow_(ctx,old?old._row:0,data,old);
 }
-function result_(row,message) {
+function result_(row,message,includePdf) {
   const out={ok:true,saved:true,booking_id:String(row["Booking ID"]),status:row.Status,
     revision:Number(row.Revision||1),updated_at:row["Updated At"]||row["Booking Date"],
     invoice_no:row["Invoice No"],invoice_verification_code:row["Invoice Verification Code"],
     invoice_created:Boolean(row["Invoice File ID"]),invoice_url:row["Invoice URL"]||"",
     invoice_sha256:row["Invoice SHA-256"]||"",customer_email_sent:truthy_(row["Customer Email Sent"]),
     document_status:row["Document Status"],message:message||"Your request has been received successfully."};
-  if (row["Invoice File ID"]) {
+  if (includePdf!==false && row["Invoice File ID"]) {
     try { out.invoice_base64=Utilities.base64Encode(DriveApp.getFileById(row["Invoice File ID"]).getBlob().getBytes()); }
     catch(e) { out.invoice_read_error="The PDF copy could not be retrieved."; }
   }
