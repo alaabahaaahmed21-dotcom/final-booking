@@ -76,36 +76,63 @@ def _post(action: str, body: dict, attempts: int = 3) -> dict:
         time.sleep(min(0.6 * 2**attempt + random.uniform(0,0.2), 3))
     return {"ok": False, "saved": False, "error": "Retry this request."}
 
-def check_availability(booking: dict) -> dict:
-    return _post("check_availability", {"booking": booking}, attempts=1)
+def check_availability(booking: dict, edit_token: str = "") -> dict:
+    return _post("check_availability", {"booking": booking, "edit_token": edit_token}, attempts=1)
 
-def save_to_google_sheets(booking: dict, max_attempts: int = 3) -> SaveResult:
-    record = dict(booking)
-    record["invoice_no"] = "INV-" + record["booking_id"].removeprefix("ITKF-")
-    record["invoice_verification_code"] = _verification_code(_secret("BOOKING_API_TOKEN"), record)
-    record["status"] = "Request received"
-    pdf, payload = None, {}
+def request_edit_code(booking_id: str, email: str) -> dict:
+    # Never automatically resend an OTP on a lost network response.
+    return _post("request_edit_code", {"booking_id": booking_id.strip().upper(), "email": email.strip()}, attempts=1)
+
+def verify_edit_code(booking_id: str, email: str, code: str) -> dict:
+    return _post("verify_edit_code", {"booking_id": booking_id.strip().upper(), "email": email.strip(), "code": code.strip()}, attempts=1)
+
+def _decode_pdf(result: dict) -> dict:
+    exact = result.pop("invoice_base64", None)
+    if exact:
+        try:
+            data = base64.b64decode(exact, validate=True)
+            if not data.startswith(b"%PDF-") or hashlib.sha256(data).hexdigest() != result.get("invoice_sha256"):
+                raise ValueError("PDF mismatch")
+            result["_invoice_pdf_bytes"] = data
+        except (ValueError, TypeError):
+            result["invoice_read_error"] = "The PDF could not be verified. Retry PDF / email or contact the organizer."
+    return result
+
+def load_request(booking_id: str, edit_token: str) -> dict:
+    return _decode_pdf(_post("load_request", {"booking_id": booking_id, "edit_token": edit_token}, attempts=1))
+
+def _pdf_payload(record: dict) -> tuple[bytes | None, dict]:
     try:
         pdf = generate_pdf(record, protect=True)
-        payload = {"base64": base64.b64encode(pdf).decode("ascii"), "mime_type": "application/pdf",
-                   "filename": record["invoice_no"]+".pdf", "sha256": hashlib.sha256(pdf).hexdigest(),
-                   "verification_code": record["invoice_verification_code"]}
+        return pdf, {"base64": base64.b64encode(pdf).decode("ascii"), "mime_type": "application/pdf",
+                     "filename": record["invoice_no"]+".pdf", "sha256": hashlib.sha256(pdf).hexdigest(),
+                     "verification_code": record["invoice_verification_code"]}
     except Exception:
-        # Do not lose a request merely because local PDF generation failed.
-        pass
-    result = _post("create_booking", {"booking": record, "invoice": payload}, attempts=max_attempts)
+        # A PDF failure must never hide or discard a durably saved request.
+        return None, {}
+
+def retry_request_documents(booking: dict, edit_token: str) -> SaveResult:
+    _, payload = _pdf_payload(booking)
+    result = _decode_pdf(_post("retry_documents", {"booking_id": booking["booking_id"],
+                           "edit_token": edit_token, "invoice": payload}))
+    return SaveResult(ok=bool(result.get("ok")), saved=bool(result.get("saved")),
+                      message=str(result.get("error") or result.get("message") or ""), data=result)
+
+def save_to_google_sheets(booking: dict, max_attempts: int = 3, edit_context: dict | None = None) -> SaveResult:
+    record = dict(booking)
+    revision = int(record.get("revision", 1))
+    record["invoice_no"] = "INV-" + record["booking_id"].removeprefix("ITKF-") + (f"-R{revision}" if revision > 1 else "")
+    record["invoice_verification_code"] = _verification_code(_secret("BOOKING_API_TOKEN"), record)
+    record["status"] = "Request received"
+    pdf, payload = _pdf_payload(record)
+    body = {"booking": record, "invoice": payload}
+    if edit_context:
+        body.update({key: edit_context[key] for key in ("edit_token", "expected_revision", "edit_operation_id")})
+    result = _decode_pdf(_post("amend_booking" if edit_context else "create_booking", body, attempts=max_attempts))
     saved = bool(result.get("saved"))
     if saved:
         result.setdefault("invoice_no", record["invoice_no"])
         result.setdefault("invoice_verification_code", record["invoice_verification_code"])
-        exact = result.pop("invoice_base64", None)
-        if exact:
-            try:
-                data = base64.b64decode(exact, validate=True)
-                if data.startswith(b"%PDF-") and hashlib.sha256(data).hexdigest() == result.get("invoice_sha256"):
-                    result["_invoice_pdf_bytes"] = data
-            except (ValueError, TypeError):
-                pass
         # If Drive is pending, the same numbered local PDF can still be downloaded.
         if not result.get("invoice_created") and pdf:
             result["_invoice_pdf_bytes"] = pdf

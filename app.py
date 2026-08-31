@@ -7,6 +7,7 @@ import copy
 import html
 import importlib.util
 import mimetypes
+import json
 from datetime import date, timedelta, time as dt_time
 from pathlib import Path
 import uuid
@@ -18,7 +19,6 @@ from config import (BORDER_COLOR, DEFAULT_COUNTRY_CODE, EVENT_TITLE, HEADER_BG_C
     HOTELS, LOGO_PATHS, ROOM_OCCUPANCY, SYSTEM_TITLE, TRANSPORT_SERVICES, TRANSPORTATION,
     APP_SCHEMA_VERSION, MAX_TRANSPORT_SERVICES)
 from countries import countries, countries_by_name, country_for_code, validate_phone
-from sheets import backend_is_configured, save_to_google_sheets, check_availability
 
 
 st.set_page_config(
@@ -28,8 +28,15 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-08-30-v3":
-    st.error("This app needs the matching v3 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-08-31-v4":
+    st.error("This app needs the matching v4 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+    st.stop()
+
+try:
+    from sheets import (backend_is_configured, save_to_google_sheets, check_availability,
+                        request_edit_code, verify_edit_code, load_request, retry_request_documents)
+except ImportError:
+    st.error("Upload the matching v4 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -497,6 +504,7 @@ DEFAULTS = {
     "check_in": date.today(), "check_out": date.today() + timedelta(days=1),
     "wants_transportation": False, "transport_ids": [],
     "last_booking": None, "pending_submission": None, "pending_error": "",
+    "edit_context": None, "edit_original": None,
 }
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
@@ -586,14 +594,26 @@ def advance_to(page):
     st.session_state.current_page = page
 
 def choose_registration(kind):
+    if st.session_state.edit_context:
+        go_to("Personal")
+        return
+    if st.session_state.last_booking:
+        st.session_state.last_booking = None
+        st.session_state.pending_submission = None
+        st.session_state.pending_error = ""
     st.session_state.registration_type = kind
     go_to("Personal")
 
 def render_navigation():
-    st.button("← Registration type", key="nav_Registration", on_click=go_to, args=("Registration",))
+    if st.session_state.edit_context:
+        st.info("Editing Request ID: " + st.session_state.edit_original["booking_id"] +
+                " · Current revision: " + str(st.session_state.edit_context["expected_revision"]))
+        st.button("← Exit edit / view saved request", key="exit_edit", on_click=open_request_manager)
+    else:
+        st.button("← Registration type", key="nav_Registration", on_click=go_to, args=("Registration",))
     for col, page in zip(st.columns(len(PAGES)), PAGES):
         with col:
-            st.button("Transport" if page == "Transportation" else page,
+            st.button({"Transportation": "Transport", "Personal": "Details"}.get(page, page),
                       key="nav_" + page, use_container_width=True,
                       type="primary" if page == st.session_state.current_page else "secondary",
                       on_click=go_to, args=(page,))
@@ -764,6 +784,8 @@ def booking_from_state():
            "hotel": state.hotel, "meal_plan": state.meal_plan, "rooms": selected_rooms(),
            "check_in": state.check_in.isoformat() if state.check_in else "",
            "check_out": state.check_out.isoformat() if state.check_out else ""}
+    if state.edit_original:
+        raw["booking_id"] = state.edit_original["booking_id"]
     try:
         raw["transport_services"] = transport_from_state()
     except (ValueError, TypeError) as exc:
@@ -854,22 +876,187 @@ def show_summary(raw):
 def attempt_save(record):
     st.session_state.pending_submission = record
     with st.spinner("Saving your request..."):
-        result = save_to_google_sheets(record)
+        result = save_to_google_sheets(record, edit_context=st.session_state.edit_context) if st.session_state.edit_context else save_to_google_sheets(record)
     if not result.saved:
         st.session_state.pending_error = result.message
         # Only clear a request when the server explicitly rejected it BEFORE reserving rooms.
-        if result.data.get("error_code") in ("VALIDATION_ERROR", "DUPLICATE_PASSPORT", "SOLD_OUT", "QUOTE_CHANGED", "SCHEMA_VERSION"):
+        if result.data.get("error_code") in ("VALIDATION_ERROR", "DUPLICATE_PASSPORT", "SOLD_OUT", "QUOTE_CHANGED", "SCHEMA_VERSION", "NO_CHANGES", "EDIT_IDENTITY", "EDIT_CLOSED"):
             st.session_state.pending_submission = None
         st.rerun()
-    booking = {**record, **result.data}
+    booking = {**record, **result.data.get("booking", {}), **result.data}
     st.session_state.last_booking = booking
     st.session_state.submitted_record = record
     st.session_state.pending_submission = None
     st.session_state.pending_error = ""
     st.rerun()
 
+
+def open_request_manager():
+    save_visible_inputs()
+    record = st.session_state.last_booking or st.session_state.edit_original or st.session_state.pending_submission
+    if record:
+        st.session_state.manage_id = record["booking_id"]
+        st.session_state.manage_email = record["email"]
+    st.session_state.current_page = "Manage"
+    st.session_state.edit_context = None
+    # Do not leave a stale result visible after an update.
+    st.session_state.pop("managed_request", None)
+    st.session_state.pop("manage_token", None)
+
+
+def start_edit_loaded():
+    response = st.session_state.managed_request
+    original = copy.deepcopy(response["booking"])
+    if not response.get("editable"):
+        return
+    for key in list(st.session_state):
+        if key.startswith(("rq_", "tr_", "_ui_")):
+            del st.session_state[key]
+    for key, value in DEFAULTS.items():
+        st.session_state[key] = copy.deepcopy(value)
+    state = st.session_state
+    state.validation_attempts = []
+    state.rendered_input_keys = []
+    state.registration_type = original["registration_type"]
+    for key in ("guest_name", "passport_number", "federation_name", "hotel", "meal_plan"):
+        state[key] = original.get(key, "")
+    state.nationality = country_for_code(original.get("nationality_code") or DEFAULT_COUNTRY_CODE).name
+    state.federation_country = original.get("federation_country") or None
+    if original.get("date_of_birth"):
+        state.date_of_birth = date.fromisoformat(original["date_of_birth"])
+    state.check_in = date.fromisoformat(original["check_in"])
+    state.check_out = date.fromisoformat(original["check_out"])
+    prefix = "individual" if original["registration_type"] == "Individual" else "federation"
+    state[prefix+"_email"] = original["email"]
+    state[prefix+"_phone"] = original.get("phone", "")
+    state.room_type = original["rooms"][0]["room_type"]
+    normalize_hotel_state()
+    for room in HOTELS[state.hotel]["rates"][state.meal_plan]:
+        state[room_key(room)] = 0
+    for room in original["rooms"]:
+        state[room_key(room["room_type"])] = room["quantity"]
+    # Regroup repeated dates without dropping distinct services on the same day.
+    grouped = []
+    for service in original.get("transport_services", []):
+        template = {key: service.get(key) for key in ("service", "direction", "start_time", "end_time", "ends_next_day", "persons", "vehicles")}
+        signature = json.dumps(template, sort_keys=True)
+        match = next((g for g in grouped if g["signature"] == signature and service["date"] not in g["dates"]), None)
+        if match is None:
+            match = {"signature": signature, "template": template, "dates": []}
+            grouped.append(match)
+        match["dates"].append(service["date"])
+    state.wants_transportation = bool(grouped)
+    for group in grouped:
+        add_transport()
+        ident = state.transport_ids[-1]
+        p = f"tr_{ident}_"
+        t = group["template"]
+        days = sorted(date.fromisoformat(v) for v in group["dates"])
+        state[p+"date"] = days[0]
+        state[p+"date_mode"] = "One date" if len(days) == 1 else "Specific dates"
+        state[p+"selected_dates"] = days
+        state[p+"date_options"] = days
+        for key in ("service", "direction", "persons"):
+            state[p+key] = t[key]
+        state[p+"start"] = dt_time.fromisoformat(t["start_time"])
+        state[p+"end"] = dt_time.fromisoformat(t["end_time"])
+        state[p+"next_day"] = bool(t["ends_next_day"])
+        for i, vehicle in enumerate(TRANSPORTATION):
+            state[p+f"v{i}"] = t["vehicles"].get(vehicle, 0)
+    state.edit_original = original
+    state.edit_context = {"edit_token": state.manage_token, "expected_revision": int(response.get("revision", 1)),
+                          "edit_operation_id": uuid.uuid4().hex}
+    state.current_page = "Personal"
+
+
+def render_request_manager():
+    section_title("🔐", "View / Edit Existing Request", "Use the Request ID from your email or PDF. Do not create a new request to change existing details.")
+    if st.button("← Back to registration", key="manage_back"):
+        st.session_state.edit_context = None
+        st.session_state.edit_original = None
+        st.session_state.current_page = "Registration"
+        st.rerun()
+    with st.form("request_code_form"):
+        ident = st.text_input("Request ID", key="manage_id", placeholder="ITKF-20260831-ABCDEF123456", max_chars=40)
+        email = st.text_input("Registered Email", key="manage_email", max_chars=254)
+        send = st.form_submit_button("Send verification code", disabled=not backend_is_configured())
+    if send:
+        st.session_state.pop("managed_request", None)
+        st.session_state.pop("manage_token", None)
+        reply = request_edit_code(ident, email)
+        (st.info if reply.get("ok") else st.error)(reply.get("message") or reply.get("error") or "Please try again.")
+    st.caption("Codes expire after 10 minutes. Maximum 5 attempts per code; request a new code if needed. Your edit session lasts one hour.")
+    with st.form("verify_code_form"):
+        code = st.text_input("Email verification code", type="password", max_chars=8)
+        verify = st.form_submit_button("Verify & open request", disabled=not backend_is_configured())
+    if verify:
+        reply = verify_edit_code(ident, email, code)
+        if reply.get("ok"):
+            st.session_state.manage_token = reply["edit_token"]
+            st.session_state.manage_verified_id = ident.strip().upper()
+            st.session_state.pop("managed_request", None)
+        else:
+            st.error(reply.get("error", "Unable to verify this code."))
+    token = st.session_state.get("manage_token")
+    if token:
+        if "managed_request" not in st.session_state:
+            reply = load_request(st.session_state.manage_verified_id, token)
+            if reply.get("ok"):
+                st.session_state.managed_request = reply
+            else:
+                st.error(reply.get("error", "Unable to load the request."))
+                if st.button("Retry loading request"):
+                    st.rerun()
+                return
+        reply = st.session_state.managed_request
+        booking = reply["booking"]
+        st.success(f"Request ID: {booking['booking_id']} · Revision: {reply.get('revision', 1)}")
+        st.code(booking["booking_id"], language=None)
+        st.write("Status: " + str(reply.get("status", "Received")))
+        st.write("Invoice / summary: " + booking["invoice_no"])
+        st.write("Saved total: " + format_currency(booking["grand_total_eur"]))
+        st.write("Name: " + (booking.get("federation_name") or booking.get("guest_name") or "-"))
+        st.write(f"{booking['hotel']} · {booking['check_in']} to {booking['check_out']}")
+        with st.expander("View saved rooms and transportation"):
+            for room in booking.get("rooms", []):
+                st.write(f"{room['room_type']} × {room['quantity']} room(s) · {format_currency(room['total_eur'])}")
+            for service in booking.get("transport_services", []):
+                suffix = " (next day)" if service.get("ends_next_day") else ""
+                st.write(f"{service['date']} · {service['service']} · {service.get('direction', '')} · {service['start_time']}–{service['end_time']}{suffix}")
+                st.write(f"Passengers: {service['persons']} · Seats: {service['seats']} · {format_currency(service['total_eur'])}")
+                for vehicle, quantity in service["vehicles"].items():
+                    st.write(f"{vehicle} × {quantity}")
+        if reply.get("_invoice_pdf_bytes"):
+            st.download_button("Download saved PDF", reply["_invoice_pdf_bytes"], file_name=booking["invoice_no"]+".pdf", mime="application/pdf", use_container_width=True)
+        if reply.get("invoice_read_error"):
+            st.warning(reply["invoice_read_error"])
+        st.info("Email sent." if reply.get("customer_email_sent") else "Email delivery is pending.")
+        if (not reply.get("invoice_created") or not reply.get("customer_email_sent") or reply.get("invoice_read_error")) and reply.get("status") not in ("Cancelled", "Rejected"):
+            if st.button("Retry PDF / email", key="manage_retry_documents", use_container_width=True):
+                with st.spinner("Preparing the saved PDF and email..."):
+                    result = retry_request_documents(booking, token)
+                if result.saved:
+                    st.session_state.pop("managed_request", None)
+                    st.rerun()
+                else:
+                    st.error(result.message)
+        if reply.get("editable"):
+            st.caption("Changes use current prices and room availability. Review the new total before saving. Registered email and registration type remain unchanged; contact the organizer to change them.")
+            rates = HOTELS.get(booking.get("hotel"), {}).get("rates", {}).get(booking.get("meal_plan"), {})
+            supported = all(r.get("room_type") in rates for r in booking.get("rooms", [])) and bool(rates)
+            supported = supported and all(s.get("service") in TRANSPORT_SERVICES and
+                all(v in TRANSPORTATION for v in s.get("vehicles", {})) for s in booking.get("transport_services", []))
+            if not supported:
+                st.warning("Some choices in this older request are no longer offered online. Contact the organizer to amend it.")
+            st.button("Edit this request", key="manage_start_edit", type="primary", use_container_width=True, on_click=start_edit_loaded, disabled=not supported)
+        else:
+            st.info("Contact the organizer to change this request.")
+
 normalize_hotel_state()
 render_header()
+if st.session_state.current_page == "Manage":
+    render_request_manager()
+    st.stop()
 if not st.session_state.registration_type:
     st.session_state.current_page = "Registration"
 if st.session_state.current_page == "Registration":
@@ -884,6 +1071,7 @@ if st.session_state.current_page == "Registration":
         st.write("Book one room using your personal and passport details, with optional transportation.")
         st.button("Continue as an Individual →", key="choose_Individual", type="primary",
                   use_container_width=True, on_click=choose_registration, args=("Individual",))
+    st.button("View / edit existing request", key="manage_existing", use_container_width=True, on_click=open_request_manager)
     st.stop()
 render_navigation()
 page = st.session_state.current_page
@@ -900,17 +1088,17 @@ if page == "Personal":
         input_field("date_input", "Date of Birth *", key="date_of_birth", container=right, min_value=date(1900,1,1), max_value=date.today(), format="YYYY-MM-DD")
         input_field("selectbox", "Nationality *", [c.name for c in countries()], key="nationality", on_change=sync_country)
         input_field("text_input", "Phone Number (including country code) *", key="individual_phone", placeholder="+201012345678")
-        input_field("text_input", "Email *", key="individual_email")
+        input_field("text_input", "Email *", key="individual_email", max_chars=254, disabled=bool(st.session_state.edit_context))
     else:
         input_field("text_input", "Federation Name *", key="federation_name", max_chars=150)
         input_field("selectbox", "Federation Country *", [c.name for c in countries()],
                      key="federation_country", index=None, placeholder="Select the federation country")
-        input_field("text_input", "Federation Email *", key="federation_email")
+        input_field("text_input", "Federation Email *", key="federation_email", max_chars=254, disabled=bool(st.session_state.edit_context))
         input_field("text_input", "Federation Phone (optional — including country code)", key="federation_phone", placeholder="+201012345678")
     raw = booking_from_state()
     if raw["phone_valid"]:
         st.caption(f"Phone: {raw['phone']}")
-    render_step_navigation(back="Registration", next_page="Hotel")
+    render_step_navigation(back="Manage" if st.session_state.edit_context else "Registration", next_page="Hotel")
 
 elif page == "Hotel":
     section_title("🏨", "Hotel & Rooms", "Choose your rooms and stay dates.")
@@ -943,7 +1131,7 @@ elif page == "Hotel":
         st.info(f"Number of nights: {totals['nights']} · Number of rooms: {totals['room_count']}")
         render_price_box(totals)
         if st.button("Check room availability", disabled=not backend_is_configured(), use_container_width=True):
-            result = check_availability(raw)
+            result = check_availability(raw, st.session_state.edit_context["edit_token"]) if st.session_state.edit_context else check_availability(raw)
             if result.get("ok"):
                 for room in result["availability"]:
                     st.write(f"{room['room_type']}: {room['remaining']} room(s) available throughout this stay.")
@@ -1061,29 +1249,35 @@ elif page == "Review":
     render_step_navigation(back="Transportation", next_page="Complete")
 
 elif page == "Complete":
-    section_title("✅", "Submit Request")
+    section_title("✅", "Save Changes" if st.session_state.edit_context else "Submit Request")
+    if st.session_state.pending_error:
+        st.error(st.session_state.pending_error)
     if st.session_state.last_booking:
         saved = st.session_state.last_booking
-        st.success(f"Your booking request has been received successfully. Request ID: {saved['booking_id']}")
+        verb = "updated" if int(saved.get("revision", 1)) > 1 else "received"
+        st.success(f"Your booking request has been {verb} successfully. Request ID: {saved['booking_id']}")
+        st.code(saved["booking_id"], language=None)
         st.info(f"Invoice / summary number: {saved.get('invoice_no', '-')}")
+        st.caption(f"Revision: {saved.get('revision', 1)}. Keep your Request ID to view or edit this same request later.")
         if saved.get("_invoice_pdf_bytes"):
             st.download_button("Download PDF", data=saved["_invoice_pdf_bytes"],
                                file_name=saved["invoice_no"]+".pdf", mime="application/pdf", use_container_width=True)
         if not saved.get("invoice_created"):
             st.warning("Your request is saved. Saving the PDF copy is pending.")
+        if saved.get("invoice_read_error"):
+            st.warning(saved["invoice_read_error"])
         if saved.get("customer_email_sent"):
             st.success("The PDF was emailed to " + saved["email"])
         else:
             st.info("Your request is saved. Email delivery is pending.")
-        if not saved.get("invoice_created") or not saved.get("customer_email_sent"):
+        if not saved.get("invoice_created") or not saved.get("customer_email_sent") or saved.get("invoice_read_error"):
             if st.button("Retry PDF / email", use_container_width=True):
                 attempt_save(st.session_state.submitted_record)
+        st.button("View / edit this request", key="complete_edit", use_container_width=True, on_click=open_request_manager)
         if st.button("Start a new request", use_container_width=True):
             st.session_state.clear()
             st.rerun()
     else:
-        if st.session_state.pending_error:
-            st.error(st.session_state.pending_error)
         if st.session_state.pending_submission:
             st.info("We have not yet received a final response. Retry the same request safely; do not create another request.")
             st.caption("Request ID: " + st.session_state.pending_submission["booking_id"])
@@ -1096,9 +1290,15 @@ elif page == "Complete":
                 st.error(error)
             if not backend_is_configured():
                 st.warning("The booking service is not configured.")
-            if st.button("Submit Booking Request", type="primary", use_container_width=True,
+            editing = st.session_state.edit_context
+            if editing:
+                st.info("Saving changes updates your existing request, checks room availability, and issues a revised EUR PDF. It does not create another booking.")
+            if st.button("Save Changes & Send Updated PDF" if editing else "Submit Booking Request", type="primary", use_container_width=True,
                          disabled=bool(errors) or not backend_is_configured()):
                 record = {**raw, **calculate_booking_totals(raw),
-                          "booking_id": generate_booking_id(), "booking_date": current_timestamp()}
+                          "booking_id": st.session_state.edit_original["booking_id"] if editing else generate_booking_id(),
+                          "booking_date": st.session_state.edit_original["booking_date"] if editing else current_timestamp(),
+                          "revision": editing["expected_revision"]+1 if editing else 1,
+                          "updated_at": current_timestamp()}
                 attempt_save(record)
         render_step_navigation(back="Review")

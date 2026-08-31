@@ -202,7 +202,7 @@ def validate_personal_fields(booking: dict[str, Any]) -> dict[str, str]:
     phone_required = kind != "Federation"
     if (phone_required or phone) and (not booking.get("phone_valid") or not re.fullmatch(r"\+[1-9]\d{6,14}", phone)):
         errors[prefix + "_phone"] = "Enter a valid international phone number, including the country code."
-    if not EMAIL_RE.fullmatch(str(booking.get("email", "")).strip()):
+    if len(str(booking.get("email", "")).strip()) > 254 or not EMAIL_RE.fullmatch(str(booking.get("email", "")).strip()):
         errors[prefix + "_email"] = "Enter a valid email address."
     return errors
 

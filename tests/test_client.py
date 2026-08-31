@@ -39,4 +39,35 @@ class ClientTests(unittest.TestCase):
         with patch.object(sheets,'_secret',return_value='test'),patch.object(sheets,'generate_pdf',return_value=b'%PDF-1.4 local different bytes'),patch.object(sheets,'_post',return_value=response):
             self.assertEqual(sheets.save_to_google_sheets(b).data['_invoice_pdf_bytes'],stored)
 
+    def test_amendment_uses_same_id_and_revision_invoice(self):
+        b=example(); b.update(calculate_booking_totals(b)); b['revision']=2
+        auth={'edit_token':'private-token','expected_revision':1,'edit_operation_id':'a'*32}
+        with patch.object(sheets,'_secret',return_value='test'),patch.object(sheets,'generate_pdf',return_value=b'%PDF-1.4 test'),patch.object(sheets,'_post',return_value={'ok':True,'saved':True}) as post:
+            sheets.save_to_google_sheets(b,edit_context=auth)
+            action,body=post.call_args.args
+            self.assertEqual(action,'amend_booking')
+            self.assertEqual(body['booking']['booking_id'],b['booking_id'])
+            self.assertTrue(body['invoice']['filename'].endswith('-R2.pdf'))
+            self.assertEqual(body['expected_revision'],1)
+            self.assertNotIn('edit_token',body['booking'])
+
+    def test_code_has_no_automatic_network_retries(self):
+        with patch.object(sheets,'_post',return_value={'ok':True}) as post:
+            sheets.request_edit_code('itkf-20260830-abcdef123456','example@example.com')
+            self.assertEqual(post.call_args.kwargs['attempts'],1)
+            self.assertEqual(post.call_args.args[1]['booking_id'],'ITKF-20260830-ABCDEF123456')
+
+    def test_pdf_integrity_failure_is_visible(self):
+        result=sheets._decode_pdf({'invoice_base64':base64.b64encode(b'%PDF-fake').decode(),'invoice_sha256':'wrong'})
+        self.assertIn('invoice_read_error',result)
+        self.assertNotIn('_invoice_pdf_bytes',result)
+
+    def test_document_recovery_uses_saved_snapshot(self):
+        b=example();b.update(calculate_booking_totals(b));b.update(invoice_no='INV-SAVED-R2',invoice_verification_code='saved-code')
+        with patch.object(sheets,'generate_pdf',return_value=b'%PDF-saved') as pdf,patch.object(sheets,'_post',return_value={'ok':True,'saved':True}) as post:
+            self.assertTrue(sheets.retry_request_documents(b,'grant').saved)
+            self.assertEqual(pdf.call_args.args[0],b)
+            self.assertEqual(post.call_args.args[0],'retry_documents')
+            self.assertEqual(post.call_args.args[1]['invoice']['verification_code'],'saved-code')
+
 if __name__=='__main__': unittest.main()

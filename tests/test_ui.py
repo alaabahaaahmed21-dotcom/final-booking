@@ -57,7 +57,7 @@ class WizardTests(unittest.TestCase):
 
     def test_registration_is_its_own_screen_federation_first(self):
         self.assertEqual(self.at.session_state['current_page'], 'Registration')
-        self.assertEqual([button.key for button in self.at.button], ['choose_Federation','choose_Individual'])
+        self.assertEqual([button.key for button in self.at.button], ['choose_Federation','choose_Individual','manage_existing'])
         self.assertFalse(list(self.at.text_input))
         self.assertFalse(list(self.at.number_input))
         self.assertFalse(list(self.at.radio))
@@ -69,7 +69,7 @@ class WizardTests(unittest.TestCase):
         with patch('config.APP_SCHEMA_VERSION','2026-08-30-v2'):
             self.at=AppTest.from_file(str(ROOT/'app.py'),default_timeout=10).run()
             self.clean()
-            self.assertTrue(any('matching v3 config.py' in item.value for item in self.at.error))
+            self.assertTrue(any('matching v4 config.py' in item.value for item in self.at.error))
             self.assertFalse(list(self.at.button))
 
     def test_old_helpers_module_in_memory_does_not_break_app(self):
@@ -508,5 +508,110 @@ class WizardTests(unittest.TestCase):
         self.clean()
         self.assertEqual(self.at.session_state['current_page'],'Personal')
         self.assertTrue(any('international phone' in m.value for m in self.at.error))
+
+    def managed_fixture(self, kind='Federation', repeated=False):
+        from test_request import example, service
+        from helpers import calculate_booking_totals
+        b=example(kind)
+        if repeated:
+            b['transport_services']=[dict(service(),date=f'2026-10-{day:02d}') for day in range(1,13)]
+            b['transport_services'].append(service())
+        b.update(calculate_booking_totals(b))
+        b.update(revision=1,invoice_no='INV-20260830-ABCDEF123456',invoice_verification_code='TEST-CODE')
+        self.at.session_state['current_page']='Manage'
+        self.at.session_state['manage_token']='test-private-grant'
+        self.at.session_state['manage_verified_id']=b['booking_id']
+        self.at.session_state['managed_request']={'ok':True,'saved':True,'booking':b,'revision':1,'editable':True,
+            'status':'Received','invoice_created':True,'customer_email_sent':True}
+        self.at.run();self.clean()
+        return b
+
+    def test_details_label_and_existing_request_entry(self):
+        self.at.button(key='manage_existing').click().run();self.clean()
+        self.assertEqual(self.at.session_state['current_page'],'Manage')
+        self.assertTrue(any(w.label=='Request ID' for w in self.at.text_input))
+        self.at.button(key='manage_back').click().run();self.choose()
+        self.assertEqual(self.at.button(key='nav_Personal').label,'Details')
+
+    def test_edit_restores_federation_and_repeated_dates(self):
+        b=self.managed_fixture(repeated=True)
+        self.at.button(key='manage_start_edit').click().run();self.clean()
+        self.assertEqual(self.widget('text_input','federation_name').value,b['federation_name'])
+        self.assertTrue(self.widget('text_input','federation_email').disabled)
+        self.assertEqual(self.at.session_state['edit_original']['booking_id'],b['booking_id'])
+        self.page('Hotel')
+        self.assertEqual(self.widget('number_input','rq_Tiba Rose El Golf_Double').value,1)
+        self.assertEqual(self.widget('number_input','rq_Tiba Rose El Golf_Single').value,0)
+        self.page('Transportation')
+        self.assertEqual(len(self.at.session_state['transport_ids']),1)
+        ident=self.at.session_state['transport_ids'][0]
+        self.assertEqual(len(self.at.session_state[f'tr_{ident}_selected_dates']),13)
+        self.page('Review')
+        self.assertTrue(any('€3,350.00' in m.value for m in self.at.markdown))
+
+    def test_amendment_submit_retries_same_id_operation_revision(self):
+        b=self.managed_fixture()
+        self.at.button(key='manage_start_edit').click().run()
+        self.widget('text_input','federation_name').input('UPDATED FEDERATION').run()
+        self.page('Complete')
+        calls=[]
+        def save(record,edit_context=None):
+            import copy
+            calls.append((copy.deepcopy(record),copy.deepcopy(edit_context)))
+            if len(calls)==1:
+                return SaveResult(ok=False,message='No final response',data={'error_code':'CONNECTION'})
+            return SaveResult(ok=True,saved=True,data={'invoice_no':'INV-20260830-ABCDEF123456-R2','revision':2,
+                'invoice_created':True,'customer_email_sent':True})
+        with patch('sheets.backend_is_configured',return_value=True),patch('sheets.save_to_google_sheets',side_effect=save):
+            self.at.run()
+            next(w for w in self.at.button if w.label=='Save Changes & Send Updated PDF').click().run();self.clean()
+            next(w for w in self.at.button if w.label=='Retry saving').click().run();self.clean()
+        self.assertEqual(calls[0],calls[1])
+        self.assertEqual(calls[0][0]['booking_id'],b['booking_id'])
+        self.assertEqual(calls[0][0]['revision'],2)
+        self.assertEqual(calls[0][1]['expected_revision'],1)
+        self.assertTrue(any('updated successfully' in m.value for m in self.at.success))
+
+    def test_individual_edit_restores_passport_and_dates(self):
+        b=self.managed_fixture('Individual')
+        self.at.button(key='manage_start_edit').click().run();self.clean()
+        self.assertEqual(self.widget('text_input','passport_number').value,b['passport_number'])
+        self.assertEqual(self.widget('date_input','date_of_birth').value,date(1996,3,21))
+        self.assertTrue(self.widget('text_input','individual_email').disabled)
+        self.page('Hotel');self.page('Personal')
+        self.assertEqual(self.widget('text_input','guest_name').value,b['guest_name'])
+
+    def test_loading_does_not_drop_two_services_on_same_date(self):
+        import copy
+        from helpers import calculate_booking_totals
+        self.managed_fixture(repeated=True)
+        response=copy.deepcopy(self.at.session_state['managed_request'])
+        response['booking']['transport_services'].append(copy.deepcopy(response['booking']['transport_services'][0]))
+        response['booking'].update(calculate_booking_totals(response['booking']))
+        self.at.session_state['managed_request']=response
+        self.at.run()
+        self.at.button(key='manage_start_edit').click().run();self.clean()
+        self.page('Transportation')
+        self.assertEqual(len(self.at.session_state['transport_ids']),2)
+        self.page('Review')
+        self.assertTrue(any('€3,600.00' in m.value for m in self.at.markdown))
+
+    def test_existing_request_requires_code_before_load(self):
+        from test_request import example
+        from helpers import calculate_booking_totals
+        b=example();b.update(calculate_booking_totals(b));b['invoice_no']='INV-TEST'
+        self.at.button(key='manage_existing').click().run()
+        self.at.text_input(key='manage_id').input(b['booking_id'])
+        self.at.text_input(key='manage_email').input(b['email'])
+        reply={'ok':True,'booking':b,'revision':1,'editable':True,'status':'Received','invoice_created':True,'customer_email_sent':True}
+        with patch('sheets.backend_is_configured',return_value=True),patch('sheets.request_edit_code',return_value={'ok':True,'message':'Code sent'}) as send,patch('sheets.verify_edit_code',return_value={'ok':True,'edit_token':'private'}) as verify,patch('sheets.load_request',return_value=reply) as load:
+            self.at.run()
+            next(w for w in self.at.button if w.label=='Send verification code').click().run();self.clean()
+            send.assert_called_once();load.assert_not_called()
+            next(w for w in self.at.text_input if w.label=='Email verification code').input('12345678')
+            next(w for w in self.at.button if w.label=='Verify & open request').click().run();self.clean()
+            verify.assert_called_once_with(b['booking_id'],b['email'],'12345678')
+            load.assert_called_once_with(b['booking_id'],'private')
+            self.assertTrue(any(w.key=='manage_start_edit' for w in self.at.button))
 
 if __name__=='__main__': unittest.main()

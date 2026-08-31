@@ -16,7 +16,7 @@ class Sheet {
   insertColumnsAfter(_,n){this.cols+=n;} insertRowsAfter(_,n){this.rows+=n;}
   setFrozenRows(){} getRange(...args){return new Range(this,...args);}
 }
-const sheets={},files=new Map();let locked=false,busy=false,quota=100,emailCount=0,seq=0;
+const sheets={},files=new Map(),emails=[];let locked=false,busy=false,quota=100,emailCount=0,seq=0;
 const blob=(bytes,mime,name)=>({getBytes:()=>Array.from(bytes),setName:()=>blob(bytes,mime,name)});
 const ss={getSheetByName:n=>sheets[n],insertSheet:n=>(sheets[n]=new Sheet()),getSpreadsheetTimeZone:()=> 'Etc/UTC'};
 const folder={getFilesByName:name=>{const found=[...files.values()].filter(f=>f.name===name);return{hasNext:()=>!!found.length,next:()=>found.shift()};},createFile:b=>{
@@ -27,8 +27,9 @@ const ctx={console,Date,Math,JSON,Object,Array,Number,String,Boolean,Error,Infin
   LockService:{getScriptLock:()=>({tryLock:()=>{if(busy||locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
   SpreadsheetApp:{openById:()=>ss,flush:()=>{}},
   DriveApp:{getFolderById:()=>folder,getFileById:id=>{if(!files.has(id))throw Error('File missing');return files.get(id);}},
-  MailApp:{getRemainingDailyQuota:()=>quota,sendEmail:()=>{emailCount++;quota--; }},
+  MailApp:{getRemainingDailyQuota:()=>quota,sendEmail:message=>{emails.push(message);emailCount++;quota--; }},
   Utilities:{DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},
+    getUuid:()=>crypto.randomUUID(),
     computeDigest:(_,value)=>Array.from(crypto.createHash('sha256').update(typeof value==='string'?value:Buffer.from(value)).digest()),
     computeHmacSha256Signature:(value,key)=>Array.from(crypto.createHmac('sha256',key).update(value).digest()),
     base64Encode:b=>Buffer.from(b).toString('base64'),base64Decode:s=>Array.from(Buffer.from(s,'base64')),
@@ -144,4 +145,94 @@ for (const phone of ['abc','+','+20']) {
 }
 const individualNoPhone=clone(person);individualNoPhone.phone='';
 failure('VALIDATION_ERROR',()=>call('normalizeBooking_',individualNoPhone));
-console.log('PASS backend: schemas, parity, quotas, retries, duplicate passport, dates, capacities, documents, concurrency lock');
+// v4: verify possession of the registered mailbox before exposing a request.
+quota=1000;
+function authenticate(b) {
+  call('updateBooking_',b.booking_id,{'Edit Code Sent At':''});
+  const before=emails.length;
+  const reply=call('requestEditCode_',b.booking_id,b.email);
+  assert(reply.ok);assert.equal(emails.length,before+1);
+  const code=emails.at(-1).body.match(/code is: (\d{8})/)[1];
+  const token=call('verifyEditCode_',b.booking_id,b.email,code).edit_token;
+  assert(token);return token;
+}
+const emailBefore=emails.length;
+const hidden=call('requestEditCode_',noPhone.booking_id,'unknown@example.com');
+assert(hidden.ok);assert.equal(emails.length,emailBefore);assert(!hidden.booking);
+const token=authenticate(noPhone);
+const loaded=call('loadRequest_',noPhone.booking_id,token);
+assert.equal(loaded.booking.email,noPhone.email);assert.equal(loaded.revision,1);
+assert(loaded.invoice_base64);assert(loaded.editable);
+assert(!JSON.stringify(loaded).includes('Edit Grant Hash'));
+failure('EDIT_AUTH',()=>call('loadRequest_',noPhone.booking_id,'bad-token'));
+failure('EDIT_CODE',()=>call('verifyEditCode_',noPhone.booking_id,noPhone.email,emails.at(-1).body.match(/code is: (\d{8})/)[1]));
+const requestCount=all('Bookings').length, invoiceCount=all('Invoices').length;
+let edited=clone(loaded.booking);
+edited.rooms[0].quantity=2;edited.grand_total_eur+=edited.rooms[0].unit_rate_eur*edited.nights;
+edited.schema_version=fixture.schema_version;edited.revision=2;edited.updated_at=new Date().toISOString();
+const auth={edit_token:token,expected_revision:1,edit_operation_id:'a'.repeat(32)};
+failure('EDIT_AUTH',()=>call('amendBooking_',edited,{}, {...auth,edit_token:'bad-token'}));
+const changedEmail=clone(edited);changedEmail.email='other@example.com';
+failure('EDIT_IDENTITY',()=>call('amendBooking_',changedEmail,{},auth));
+const changedType=clone(edited);changedType.registration_type='Individual';
+failure('EDIT_IDENTITY',()=>call('amendBooking_',changedType,{},auth));
+result=call('amendBooking_',edited,invoice(edited),auth);
+assert(result.saved);assert(result.customer_email_sent);assert(result.invoice_created);
+assert.equal(result.revision,2);assert(result.invoice_no.endsWith('-R2'));
+assert.equal(all('Bookings').length,requestCount,'amendment replaces the same row');
+assert.equal(all('Invoices').length,invoiceCount+1,'prior invoice retained');
+assert.equal(all('Request History').filter(r=>r['Booking ID']===edited.booking_id).length,1);
+assert.equal(call('availability_',call('accommodation_',edited),all('Bookings'))[0].remaining,8,'only revised room count is held');
+const mailAfterEdit=emails.length;
+result=call('amendBooking_',edited,invoice(edited),auth);
+assert.equal(result.revision,2);assert.equal(all('Bookings').length,requestCount);assert.equal(emails.length,mailAfterEdit,'lost edit response is idempotent');
+failure('EDIT_CONFLICT',()=>call('amendBooking_',edited,{}, {...auth,edit_operation_id:'b'.repeat(32)}));
+failure('NO_CHANGES',()=>call('amendBooking_',edited,{}, {...auth,expected_revision:2,edit_operation_id:'b'.repeat(32)}));
+const reordered=clone(edited);reordered.transport_services.reverse();
+failure('NO_CHANGES',()=>call('amendBooking_',reordered,{}, {...auth,expected_revision:2,edit_operation_id:'b'.repeat(32)}));
+const oversized=clone(edited);oversized.rooms[0].quantity=11;oversized.revision=3;
+oversized.grand_total_eur+=9*oversized.rooms[0].unit_rate_eur*oversized.nights;
+failure('SOLD_OUT',()=>call('amendBooking_',oversized,{}, {...auth,expected_revision:2,edit_operation_id:'c'.repeat(32)}));
+assert.equal(call('loadRequest_',edited.booking_id,token).revision,2,'failed update leaves previous request intact');
+const editableAvailability=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',
+  action:'check_availability',booking:edited,edit_token:token})}});
+assert.equal(editableAvailability.availability[0].remaining,10,'preview excludes own reservation only after authorization');
+// Missing Drive copy can be repaired after reopening, without another revision.
+let latest=call('loadRequest_',edited.booking_id,token);
+const missingFile=all('Bookings').find(r=>r['Booking ID']===edited.booking_id)['Invoice File ID'];files.delete(missingFile);
+latest=call('loadRequest_',edited.booking_id,token);assert(latest.invoice_read_error);
+const repaired=call('processDocuments_',latest.booking,invoice(latest.booking));
+assert(repaired.invoice_base64);assert(repaired.customer_email_sent);assert.equal(repaired.revision,2);
+failure('EDIT_CONFLICT',()=>call('updateDocument_',latest.booking,'old-lease',{'Customer Email Sent':false}));
+// Quota failures preserve the revised request and can be retried after reopening.
+const third=clone(edited);third.rooms[0].quantity=3;third.revision=3;third.grand_total_eur+=100;
+quota=0;
+const auth3={...auth,expected_revision:2,edit_operation_id:'d'.repeat(32)};
+const mailFail=call('amendBooking_',third,invoice(third),auth3);
+assert(mailFail.saved);assert(mailFail.invoice_created);assert(!mailFail.customer_email_sent);
+quota=100;call('retryPendingEmails');
+assert(call('loadRequest_',edited.booking_id,token).customer_email_sent);
+assert.equal(all('Bookings').length,requestCount);
+// Unchanged individual passport is allowed on its own record, never on another.
+const personToken=authenticate(person);
+const personal=clone(call('loadRequest_',person.booking_id,personToken).booking);
+personal.phone='+201112345678';personal.revision=2;personal.schema_version=fixture.schema_version;
+personal.check_in='2026-12-01';personal.check_out='2026-12-03';
+assert(call('amendBooking_',personal,invoice(personal),{edit_token:personToken,expected_revision:1,edit_operation_id:'e'.repeat(32)}).saved);
+const otherPerson=changed(person,'ABC');otherPerson.passport_number='OTHER123';otherPerson.check_in='2026-12-01';otherPerson.check_out='2026-12-03';
+call('createBooking_',otherPerson,invoice(otherPerson));
+personal.passport_number='OTHER123';personal.revision=3;
+failure('DUPLICATE_PASSPORT',()=>call('amendBooking_',personal,{}, {edit_token:personToken,expected_revision:2,edit_operation_id:'f'.repeat(32)}));
+// Bad OTP attempts and expiration do not grant access; send cooldown limits abuse.
+call('updateBooking_',otherPerson.booking_id,{'Edit Code Sent At':''});
+call('requestEditCode_',otherPerson.booking_id,otherPerson.email);
+const correct=emails.at(-1).body.match(/code is: (\d{8})/)[1], sends=emails.length;
+call('requestEditCode_',otherPerson.booking_id,otherPerson.email);assert.equal(emails.length,sends);
+for(let i=0;i<5;i++) failure('EDIT_CODE',()=>call('verifyEditCode_',otherPerson.booking_id,otherPerson.email,'xxxxxxxx'));
+failure('EDIT_CODE',()=>call('verifyEditCode_',otherPerson.booking_id,otherPerson.email,correct));
+call('updateBooking_',edited.booking_id,{'Edit Grant Expires':'2000-01-01T00:00:00Z'});
+failure('EDIT_AUTH',()=>call('loadRequest_',edited.booking_id,token));
+call('updateBooking_',person.booking_id,{Status:'Cancelled'});
+assert(!call('loadRequest_',person.booking_id,personToken).editable);
+failure('EDIT_CLOSED',()=>call('amendBooking_',personal,{}, {edit_token:personToken,expected_revision:2,edit_operation_id:'f'.repeat(32)}));
+console.log('PASS backend: schemas, parity, quotas, retries, passport uniqueness, room holds, OTP, amendments, revisions, recovery, conflict protection');

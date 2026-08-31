@@ -155,7 +155,7 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
         rules = [("VALIGN",(0,0),(-1,-1),"TOP"),
                  ("LINEBELOW",(0,0),(-1,-1),0.25,colors.HexColor("#DDDDDD")),
                  ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),
-                 ("TOPPADDING",(0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5)]
+                 ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]
         if header:
             rules.append(("BACKGROUND",(0,0),(-1,0),colors.HexColor("#F3F4F6")))
         obj.setStyle(TableStyle(rules))
@@ -171,8 +171,10 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
     details = [
         ["Invoice / Summary No",booking.get("invoice_no")],
         ["Request ID",booking.get("booking_id")],
+        ["Revision",booking.get("revision", 1)],
         ["Verification Code",booking.get("invoice_verification_code")],
         ["Request Date",booking.get("booking_date")],
+        ["Last Updated",booking.get("updated_at") or booking.get("booking_date")],
         ["Registration Type",booking.get("registration_type")],
         ["Guest Name" if individual else "Federation Name",
          booking.get("guest_name") if individual else booking.get("federation_name")],
@@ -211,7 +213,10 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
                         ["Grand Total",_money(booking.get("grand_total_eur"),"EUR")]], [116*mm,62*mm]))
     if booking.get("transport_services"):
         story.append(paragraph("Transportation prices include 14% VAT."))
-    story.extend([Spacer(1,4*mm),paragraph("Request received successfully. Please quote your Request ID in any communication.")])
+    story.extend([Spacer(1,4*mm),paragraph("This is a booking request summary, not payment or final hotel confirmation. Please quote your Request ID in any communication."),
+                  paragraph("To change this request, choose View / edit existing request in the application and verify your registered email. Do not submit a duplicate request.")])
+    if int(booking.get("revision", 1)) > 1:
+        story.append(paragraph("This revision replaces earlier request summaries for the same Request ID."))
     def footer(canvas, doc):
         canvas.saveState()
         canvas.setFont(FONT_REGULAR,7)

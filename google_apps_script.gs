@@ -1,10 +1,10 @@
 /**
- * ITKF request backend v3. Existing Bookings/Invoices rows are preserved.
+ * ITKF request backend v4. Existing Bookings/Invoices rows are preserved.
  * Properties: SPREADSHEET_ID, BOOKING_API_TOKEN, INVOICE_FOLDER_ID
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-08-30-v3";
+const VERSION = "2026-08-31-v4";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
@@ -14,12 +14,17 @@ const BOOKING_HEADERS = [
   "Grand Total EUR","Invoice No","Invoice Verification Code","Invoice File ID","Invoice URL",
   "Invoice SHA-256","Customer Email Sent","Email Sent At","Status","Document Status",
   "Processing Started","Last Error","Request Hash","Booking JSON","Schema Version",
-  "Federation Country","Federation Country Code"
+  "Federation Country","Federation Country Code","Revision","Updated At","Last Edit ID",
+  "Edit Code Hash","Edit Code Expires","Edit Code Attempts","Edit Code Sent At",
+  "Edit Code Window","Edit Code Sends","Edit Grant Hash","Edit Grant Expires","Document Lease"
 ];
 const INVOICE_HEADERS = [
   "Invoice No","Booking ID","Created At","Customer Name","Customer Email","Grand Total EUR",
-  "Invoice File ID","Invoice URL","Invoice Verification Code","Invoice SHA-256","Email Status","Last Error"
+  "Invoice File ID","Invoice URL","Invoice Verification Code","Invoice SHA-256","Email Status","Last Error",
+  "Revision","Updated At"
 ];
+const HISTORY_SHEET = "Request History";
+const HISTORY_HEADERS = ["Booking ID","Revision","Archived At","Booking JSON","Status"];
 const INVENTORY_HEADERS = ["Hotel","Room Type","Date","Capacity"];
 const ROOM_OCCUPANCY = {"Single":1,"Double":2,"Triple":3,"Quadruple":4,"Suite (2 rooms / 4 persons)":4};
 const TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle";
@@ -74,10 +79,23 @@ function doPost(e) {
     if (req.action === "check_availability") {
       return json_(locked_(function() {
         const b = accommodation_(req.booking || {});
-        return {ok:true,availability:availability_(b, rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)))};
+        let rows=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS));
+        if (req.edit_token) {
+          const row=authorizedEdit_(req.booking.booking_id,req.edit_token,rows);
+          rows=rows.filter(r=>r._row!==row._row);
+        }
+        return {ok:true,availability:availability_(b,rows)};
       }));
     }
     if (req.action === "create_booking") return json_(createBooking_(req.booking || {}, req.invoice || {}));
+    if (req.action === "request_edit_code") return json_(requestEditCode_(req.booking_id,req.email));
+    if (req.action === "verify_edit_code") return json_(verifyEditCode_(req.booking_id,req.email,req.code));
+    if (req.action === "load_request") return json_(loadRequest_(req.booking_id,req.edit_token));
+    if (req.action === "amend_booking") return json_(amendBooking_(req.booking || {},req.invoice || {},req));
+    if (req.action === "retry_documents") {
+      const saved=loadRequest_(req.booking_id,req.edit_token);
+      return json_(processDocuments_(saved.booking,req.invoice || {}));
+    }
     if (req.action === "check_duplicate") {
       return json_({ok:true,exists:passportExists_(rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)),req.passport_number)});
     }
@@ -207,13 +225,16 @@ function normalizeBooking_(raw) {
   b.transport_rate_version=TRANSPORT_RATE_VERSION;
   if (!isFinite(Number(raw.grand_total_eur)) || Math.abs(Number(raw.grand_total_eur)-b.grand_total_eur)>0.001)
     throw codedError_("QUOTE_CHANGED","The quote changed. Please review the current prices.");
-  b.invoice_no="INV-"+b.booking_id.replace(/^ITKF-/,"");
+  b.revision=raw.revision===undefined?1:int_(raw.revision,"revision",100000,false);
+  b.updated_at=String(raw.updated_at || b.booking_date);
+  if (!isFinite(Date.parse(b.updated_at))) throw codedError_("VALIDATION_ERROR","Invalid update date.");
+  b.invoice_no=invoiceNumber_(b.booking_id,b.revision);
   b.invoice_verification_code=verificationCode_(b);
   b.status="Request received";
   if (JSON.stringify(b).length>45000) throw codedError_("VALIDATION_ERROR","This request has too many service details. Split it into smaller requests.");
   return b;
 }
-function requestHash_(b) {
+function requestHash_(b,ignoreOrder) {
   // Only user choices; computed totals and generated PDF bytes are deliberately excluded.
   const data={};
   ["registration_type","guest_name","federation_name","passport_number","date_of_birth",
@@ -228,6 +249,10 @@ function requestHash_(b) {
     date:r.date,service:r.service,direction:r.direction||"",start_time:r.start_time,end_time:r.end_time,
     ends_next_day:r.ends_next_day===true,persons:r.persons,vehicles:r.vehicles
   }));
+  if (ignoreOrder) {
+    const compare=(a,b)=>JSON.stringify(sorted_(a)).localeCompare(JSON.stringify(sorted_(b)));
+    data.rooms.sort(compare); data.transport_services.sort(compare);
+  }
   return sha_(JSON.stringify(sorted_(data)));
 }
 function sorted_(value) {
@@ -295,6 +320,7 @@ function createBooking_(raw,invoice) {
       return {booking:JSON.parse(existing["Booking JSON"]),row:existing};
     }
     const b=normalizeBooking_(raw);
+    if (b.revision!==1) throw codedError_("VALIDATION_ERROR","A new request must start at revision 1.");
     if (b.registration_type==="Individual" && passportExists_(rows,b.passport_number))
       throw codedError_("DUPLICATE_PASSPORT","This passport number is already registered.");
     availability_(b,rows).forEach(r=>{
@@ -326,18 +352,159 @@ function bookingColumns_(b) {
     "Check-in":b.check_in,"Check-out":b.check_out,"Nights":b.nights,"Rooms JSON":JSON.stringify(b.rooms),
     "Transportation JSON":JSON.stringify(b.transport_services),"Transportation Rate Version":b.transport_rate_version,
     "Room Total EUR":b.room_total_eur,"Transportation Total EUR":b.transport_total_eur,"Grand Total EUR":b.grand_total_eur,
-    "Invoice No":b.invoice_no,"Invoice Verification Code":b.invoice_verification_code,"Schema Version":VERSION};
+    "Invoice No":b.invoice_no,"Invoice Verification Code":b.invoice_verification_code,"Schema Version":VERSION,
+    "Revision":b.revision||1,"Updated At":b.updated_at||b.booking_date};
+}
+function invoiceNumber_(id,revision) {
+  return "INV-"+id.replace(/^ITKF-/,"")+(revision>1?"-R"+revision:"");
+}
+function editable_(row) {
+  if (["Received","Request received","Updated"].indexOf(String(row.Status))<0)
+    throw codedError_("EDIT_CLOSED","This request cannot be edited online. Please contact the organizer.");
+  if (!row["Booking JSON"]) throw codedError_("EDIT_CLOSED","Please contact the organizer to update this older request.");
+}
+function requestId_(value) {
+  const id=String(value||"").trim().toUpperCase();
+  if (!/^ITKF-\d{8}-[A-F0-9]{12}$/.test(id)) throw codedError_("VALIDATION_ERROR","Enter the complete Request ID from your email or PDF.");
+  return id;
+}
+function authorizedEdit_(id,token,rows) {
+  const row=rows.find(r=>String(r["Booking ID"])===requestId_(id));
+  if (!row || !token || String(token).length>200 ||
+      !Number.isFinite(Date.parse(row["Edit Grant Expires"]||"")) || Date.parse(row["Edit Grant Expires"])<=Date.now() ||
+      !equal_(sha_(String(token)),row["Edit Grant Hash"]))
+    throw codedError_("EDIT_AUTH","Your edit session is invalid or expired. Request a new email code.");
+  return row;
+}
+function requestEditCode_(id,email) {
+  id=requestId_(id); email=String(email||"").trim().toLowerCase();
+  if (email.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    throw codedError_("VALIDATION_ERROR","Enter your registered email address.");
+  const generic={ok:true,message:"If the Request ID and registered email match, a verification code will be emailed. Check Spam too. Wait at least 60 seconds before requesting another code."};
+  return locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),row=find_(ctx,"Booking ID",id),now=Date.now();
+    // A request number alone never reveals whether a person is registered.
+    if (!row || String(row.Email).trim().toLowerCase()!==email || !row["Booking JSON"]) return generic;
+    const last=Date.parse(row["Edit Code Sent At"]||"");
+    const window=Date.parse(row["Edit Code Window"]||"");
+    const recent=Number.isFinite(window) && now-window<60*60*1000;
+    if ((Number.isFinite(last) && now-last<60000) || (recent && Number(row["Edit Code Sends"])>=5)) return generic;
+    if (MailApp.getRemainingDailyQuota()<1) throw codedError_("EMAIL_QUOTA","Email is temporarily unavailable. Please try later or contact the organizer.");
+    // UUID entropy is HMAC-mixed; never use Math.random for authentication.
+    const entropy=digestHex_(Utilities.computeHmacSha256Signature(Utilities.getUuid()+Utilities.getUuid(),prop_("BOOKING_API_TOKEN"),Utilities.Charset.UTF_8));
+    const code=String(parseInt(entropy.slice(0,12),16)%100000000).padStart(8,"0");
+    writeRow_(ctx,row._row,{"Edit Code Hash":sha_(id+"|"+code),"Edit Code Expires":new Date(now+10*60000).toISOString(),
+      "Edit Code Attempts":0,"Edit Code Sent At":new Date(now).toISOString(),
+      "Edit Code Window":recent?row["Edit Code Window"]:new Date(now).toISOString(),
+      "Edit Code Sends":recent?Number(row["Edit Code Sends"]||0)+1:1},row);
+    SpreadsheetApp.flush();
+    MailApp.sendEmail({to:row.Email,subject:"ITKF request verification code",
+      body:"Your verification code is: "+code+"\nRequest ID: "+id+
+        "\nThe code expires in 10 minutes. Do not share it. If you did not request it, ignore this email.",
+      name:optionalProp_("COMPANY_NAME")||"Egyptian Traditional Karate Federation"});
+    return generic;
+  });
+}
+function verifyEditCode_(id,email,code) {
+  id=requestId_(id); email=String(email||"").trim().toLowerCase(); code=String(code||"").trim();
+  return locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),row=find_(ctx,"Booking ID",id);
+    const invalid=()=>codedError_("EDIT_CODE","The code is incorrect or expired. Request a new code if needed.");
+    if (!row || String(row.Email).trim().toLowerCase()!==email || !row["Edit Code Hash"] ||
+        !Number.isFinite(Date.parse(row["Edit Code Expires"]||"")) || Date.parse(row["Edit Code Expires"])<=Date.now() ||
+        Number(row["Edit Code Attempts"]||0)>=5) throw invalid();
+    if (!/^\d{8}$/.test(code) || !equal_(sha_(id+"|"+code),row["Edit Code Hash"])) {
+      writeRow_(ctx,row._row,{"Edit Code Attempts":Number(row["Edit Code Attempts"]||0)+1},row);
+      SpreadsheetApp.flush(); throw invalid();
+    }
+    const token=Utilities.getUuid().replace(/-/g,"")+Utilities.getUuid().replace(/-/g,"");
+    const expiry=new Date(Date.now()+60*60000).toISOString();
+    writeRow_(ctx,row._row,{"Edit Grant Hash":sha_(token),"Edit Grant Expires":expiry,
+      "Edit Code Hash":"","Edit Code Expires":"","Edit Code Attempts":0},row);
+    SpreadsheetApp.flush();
+    return {ok:true,edit_token:token,expires_at:expiry};
+  });
+}
+function loadRequest_(id,token) {
+  const row=locked_(function() {
+    return authorizedEdit_(id,token,rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)));
+  });
+  const b=JSON.parse(row["Booking JSON"]);
+  b.revision=Number(row.Revision||b.revision||1);
+  b.updated_at=row["Updated At"]||b.updated_at||b.booking_date;
+  const result=result_(row);
+  return Object.assign(result,{booking:b,editable:["Received","Request received","Updated"].indexOf(String(row.Status))>=0});
+}
+function archiveRequest_(row) {
+  const ctx=ensureSheet_(HISTORY_SHEET,HISTORY_HEADERS),revision=Number(row.Revision||1);
+  if (!rows_(ctx).some(r=>r["Booking ID"]===row["Booking ID"] && Number(r.Revision)===revision))
+    writeRow_(ctx,0,{"Booking ID":row["Booking ID"],"Revision":revision,"Archived At":new Date().toISOString(),
+      "Booking JSON":row["Booking JSON"],"Status":row.Status});
+  invoiceLog_(JSON.parse(row["Booking JSON"]),row);
+}
+function amendBooking_(raw,invoice,req) {
+  const saved=locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),rows=rows_(ctx);
+    const row=authorizedEdit_(raw.booking_id,req.edit_token,rows);
+    editable_(row);
+    const operation=String(req.edit_operation_id||"");
+    if (!/^[a-f0-9]{32}$/.test(operation)) throw codedError_("VALIDATION_ERROR","Invalid edit operation.");
+    // A lost response can be retried without another revision, room hold or email.
+    if (row["Last Edit ID"]===operation) {
+      if (!equal_(row["Request Hash"],requestHash_(raw))) throw codedError_("ID_CONFLICT","This edit attempt already saved different details. Reload the request.");
+      return {booking:JSON.parse(row["Booking JSON"]),row:row};
+    }
+    const revision=Number(row.Revision||1);
+    if (int_(req.expected_revision,"revision",100000,false)!==revision)
+      throw codedError_("EDIT_CONFLICT","This request was updated elsewhere. Reload it before making further changes.");
+    const started=Date.parse(row["Processing Started"]||"");
+    if (row["Document Status"]==="Processing" && started && Date.now()-started<10*60000)
+      throw codedError_("BUSY","The current PDF/email is being processed. Retry this same edit shortly.");
+    const old=JSON.parse(row["Booking JSON"]);
+    if (raw.registration_type!==old.registration_type || String(raw.email||"").trim().toLowerCase()!==String(old.email).trim().toLowerCase())
+      throw codedError_("EDIT_IDENTITY","Registration type and registered email cannot be changed online. Contact the organizer.");
+    if (requestHash_(raw,true)===requestHash_(old,true))
+      throw codedError_("NO_CHANGES","No details changed. Use View / download request to retrieve or retry the existing PDF.");
+    const b=normalizeBooking_(Object.assign({},raw,{booking_id:old.booking_id,booking_date:old.booking_date,
+      email:old.email,revision:revision+1}));
+    const others=rows.filter(r=>r._row!==row._row);
+    if (b.registration_type==="Individual" && passportExists_(others,b.passport_number))
+      throw codedError_("DUPLICATE_PASSPORT","This passport number is already registered on another request.");
+    availability_(b,others).forEach(r=>{
+      if(r.requested>r.remaining) throw codedError_("SOLD_OUT",r.room_type+": only "+r.remaining+" room(s) available for these dates. Your existing request was not changed.");
+    });
+    archiveRequest_(row);
+    const changes=Object.assign(bookingColumns_(b),{"Booking JSON":JSON.stringify(b),"Request Hash":requestHash_(b),
+      "Last Edit ID":operation,"Status":row.Status,"Document Status":"Pending","Processing Started":"","Document Lease":"",
+      "Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"","Customer Email Sent":false,"Email Sent At":"","Last Error":""});
+    // Replace the existing row atomically under the inventory lock; never append a new booking.
+    writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush();
+    return {booking:b,row:Object.assign(row,changes)};
+  });
+  try { return processDocuments_(saved.booking,invoice); }
+  catch(e) { return result_(saved.row,"The changes were saved. PDF/email processing is pending."); }
 }
 function processDocuments_(b,payload) {
   const lease=locked_(function() {
     const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), row=find_(ctx,"Booking ID",b.booking_id);
     if (!row) throw codedError_("SERVER_ERROR","Saved request could not be located.");
-    if (row["Invoice File ID"] && truthy_(row["Customer Email Sent"])) return {done:true,row:row};
+    if (["Cancelled","Rejected"].indexOf(String(row.Status))>=0) throw codedError_("EDIT_CLOSED","This request is no longer active.");
+    if (row["Invoice No"]!==b.invoice_no) throw codedError_("EDIT_CONFLICT","A newer request revision exists. Reload the request.");
     const started=Date.parse(String(row["Processing Started"]||""));
     if (row["Document Status"]==="Processing" && started && Date.now()-started<10*60*1000)
       return {done:true,row:row};
-    writeRow_(ctx,row._row,{"Document Status":"Processing","Processing Started":new Date().toISOString()},row);
-    SpreadsheetApp.flush(); return {done:false,row:row};
+    if (row["Invoice File ID"]) {
+      try { DriveApp.getFileById(row["Invoice File ID"]).getBlob().getBytes(); }
+      catch(e) {
+        Object.assign(row,{"Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"",
+          "Customer Email Sent":false,"Email Sent At":""});
+      }
+    }
+    if (row["Invoice File ID"] && truthy_(row["Customer Email Sent"])) return {done:true,row:row};
+    const token=Utilities.getUuid();
+    Object.assign(row,{"Document Status":"Processing","Processing Started":new Date().toISOString(),"Document Lease":token});
+    writeRow_(ctx,row._row,row,row);
+    SpreadsheetApp.flush(); return {done:false,row:row,token:token};
   });
   if (lease.done) {
     // Repair the secondary invoice log if a prior execution stopped after email.
@@ -350,23 +517,29 @@ function processDocuments_(b,payload) {
   try {
     if (!row["Invoice File ID"]) {
       const file=saveInvoicePdf_(payload,b);
-      row=updateBooking_(b.booking_id,{"Invoice File ID":file.id,"Invoice URL":file.url,"Invoice SHA-256":file.sha256});
+      row=updateDocument_(b,lease.token,{"Invoice File ID":file.id,"Invoice URL":file.url,"Invoice SHA-256":file.sha256});
     }
     if (!truthy_(row["Customer Email Sent"])) {
       if (MailApp.getRemainingDailyQuota()<1) throw Error("Daily email quota reached; delivery will be retried.");
       const name=b.federation_name || b.guest_name;
+      const attachment=DriveApp.getFileById(row["Invoice File ID"]).getBlob();
+      if (!equal_(digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,attachment.getBytes())),row["Invoice SHA-256"]))
+        throw Error("Stored PDF integrity check failed. Contact the organizer before sending.");
       MailApp.sendEmail({
         to:b.email,subject:b.invoice_no+" - ITKF Booking Request",
-        body:"Dear "+name+",\n\nYour booking request has been received successfully.\nRequest ID: "+b.booking_id+
+        body:"Dear "+name+",\n\nYour booking request "+((b.revision||1)>1?"has been updated.":"has been received successfully.")+"\nRequest ID: "+b.booking_id+
           "\nSummary / invoice: "+b.invoice_no+"\nTotal: EUR "+b.grand_total_eur.toFixed(2)+
-          "\n\nYour PDF is attached.",
+          "\nRevision: "+(b.revision||1)+"\n\nYour PDF is attached. This is a request summary, not payment or final hotel confirmation."+
+          "\nTo view or amend the same request, open the application, choose View / edit existing request, and enter this Request ID and your registered email."+
+          "\nYou will receive a verification code. Do not submit a new request for the same booking."+
+          (optionalProp_("PUBLIC_APP_URL")?"\nApplication: "+optionalProp_("PUBLIC_APP_URL"):""),
         name:optionalProp_("COMPANY_NAME") || "Egyptian Traditional Karate Federation",
-        attachments:[DriveApp.getFileById(row["Invoice File ID"]).getBlob().setName(b.invoice_no+".pdf")]
+        attachments:[attachment.setName(b.invoice_no+".pdf")]
       });
-      row=updateBooking_(b.booking_id,{"Customer Email Sent":true,"Email Sent At":new Date().toISOString()});
+      row=updateDocument_(b,lease.token,{"Customer Email Sent":true,"Email Sent At":new Date().toISOString()});
     }
   } catch(e) { errors.push(safeError_(e)); }
-  row=updateBooking_(b.booking_id,{"Document Status":errors.length?"Pending":"Ready","Processing Started":"","Last Error":errors.join(" | ")});
+  row=updateDocument_(b,lease.token,{"Document Status":errors.length?"Pending":"Ready","Processing Started":"","Document Lease":"","Last Error":errors.join(" | ")});
   try { locked_(function() { invoiceLog_(b,row); }); } catch(e) { /* Booking row remains the authoritative record. */ }
   return result_(row);
 }
@@ -397,17 +570,27 @@ function updateBooking_(id,changes) {
     return Object.assign(row,changes);
   });
 }
+function updateDocument_(b,token,changes) {
+  return locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),row=find_(ctx,"Booking ID",b.booking_id);
+    if (!row || row["Invoice No"]!==b.invoice_no || row["Document Lease"]!==token)
+      throw codedError_("EDIT_CONFLICT","Document processing was superseded. Reload the request.");
+    writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush(); return Object.assign(row,changes);
+  });
+}
 function invoiceLog_(b,row) {
   const ctx=ensureSheet_(INVOICES_SHEET,INVOICE_HEADERS), old=find_(ctx,"Invoice No",b.invoice_no);
   const data={"Invoice No":b.invoice_no,"Booking ID":b.booking_id,"Created At":b.booking_date,
     "Customer Name":b.federation_name||b.guest_name,"Customer Email":b.email,"Grand Total EUR":b.grand_total_eur,
     "Invoice File ID":row["Invoice File ID"]||"","Invoice URL":row["Invoice URL"]||"",
     "Invoice Verification Code":b.invoice_verification_code,"Invoice SHA-256":row["Invoice SHA-256"]||"",
-    "Email Status":truthy_(row["Customer Email Sent"])?"Sent":"Pending","Last Error":row["Last Error"]||""};
+    "Email Status":truthy_(row["Customer Email Sent"])?"Sent":"Pending","Last Error":row["Last Error"]||"",
+    "Revision":b.revision||1,"Updated At":b.updated_at||b.booking_date};
   writeRow_(ctx,old?old._row:0,data,old);
 }
 function result_(row,message) {
-  const out={ok:true,saved:true,booking_id:String(row["Booking ID"]),status:"Request received",
+  const out={ok:true,saved:true,booking_id:String(row["Booking ID"]),status:row.Status,
+    revision:Number(row.Revision||1),updated_at:row["Updated At"]||row["Booking Date"],
     invoice_no:row["Invoice No"],invoice_verification_code:row["Invoice Verification Code"],
     invoice_created:Boolean(row["Invoice File ID"]),invoice_url:row["Invoice URL"]||"",
     invoice_sha256:row["Invoice SHA-256"]||"",customer_email_sent:truthy_(row["Customer Email Sent"]),
@@ -416,6 +599,7 @@ function result_(row,message) {
     try { out.invoice_base64=Utilities.base64Encode(DriveApp.getFileById(row["Invoice File ID"]).getBlob().getBytes()); }
     catch(e) { out.invoice_read_error="The PDF copy could not be retrieved."; }
   }
+  if (row["Booking JSON"]) out.booking=JSON.parse(row["Booking JSON"]);
   return out;
 }
 function ensureSheet_(name,required) {
@@ -457,6 +641,7 @@ function setupSheetsNow() {
   locked_(function() {
     ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS);
     ensureSheet_(INVOICES_SHEET,INVOICE_HEADERS);
+    ensureSheet_(HISTORY_SHEET,HISTORY_HEADERS);
     const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS), rows=rows_(ctx);
     Object.keys(HOTEL_RATES_EUR).forEach(function(hotel) {
       const rooms={}; Object.values(HOTEL_RATES_EUR[hotel]).forEach(plan=>Object.keys(plan).forEach(room=>rooms[room]=true));
