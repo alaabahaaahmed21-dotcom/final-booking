@@ -54,14 +54,11 @@ def _post(action: str, body: dict, attempts: int = 3) -> dict:
     if not backend_is_configured():
         return {"ok": False, "saved": False, "error": "Set GOOGLE_APPS_SCRIPT_URL and BOOKING_API_TOKEN in Streamlit Secrets."}
     url = _url()
-    # Availability is a high-frequency read. The POST itself already carries
-    # schema_version and Apps Script rejects mismatches before dispatching the
-    # action, so an extra GET version probe would only double network latency.
-    # Keep the friendly preflight for lower-frequency write/edit operations.
-    if action not in {"check_availability", "check_all_availability"}:
-        problem = _check_version(url)
-        if problem:
-            return {"ok": False, "saved": False, **problem}
+    # Every authenticated POST carries schema_version and Apps Script validates
+    # it before dispatch. Avoid a separate GET preflight here: on final submit
+    # it would add a full network round trip before both the reservation write
+    # and the document-processing call. _check_version remains available for
+    # diagnostics, while live requests rely on the same authoritative POST check.
     payload = {"schema_version": APP_SCHEMA_VERSION, "action": action,
                "token": _secret("BOOKING_API_TOKEN"), **body}
     for attempt in range(attempts):
@@ -130,30 +127,53 @@ def _pdf_payload(record: dict) -> tuple[bytes | None, dict]:
         # A PDF failure must never hide or discard a durably saved request.
         return None, {}
 
+def _with_local_pdf(result: dict, pdf: bytes | None) -> dict:
+    """Use the locally generated exact PDF instead of downloading it back from Drive."""
+    if pdf and result.get("invoice_created"):
+        expected = str(result.get("invoice_sha256") or "")
+        actual = hashlib.sha256(pdf).hexdigest()
+        if not expected or hmac.compare_digest(actual, expected):
+            result["_invoice_pdf_bytes"] = pdf
+        else:
+            result["invoice_read_error"] = "The saved PDF verification did not match. Retry PDF / email or contact the organizer."
+    return result
+
+def process_saved_documents(booking: dict, edit_token: str = "", force_check: bool = False) -> SaveResult:
+    """Create/store/email documents after the booking row is already durably saved."""
+    pdf, payload = _pdf_payload(booking)
+    body = {"booking_id": booking["booking_id"], "invoice": payload, "force_check": bool(force_check)}
+    if edit_token:
+        body["edit_token"] = edit_token
+    result = _with_local_pdf(_post("process_documents", body, attempts=1), pdf)
+    return SaveResult(ok=bool(result.get("ok")), saved=bool(result.get("saved")),
+                      message=str(result.get("error") or result.get("message") or ""), data=result)
+
 def retry_request_documents(booking: dict, edit_token: str) -> SaveResult:
-    _, payload = _pdf_payload(booking)
-    result = _decode_pdf(_post("retry_documents", {"booking_id": booking["booking_id"],
-                           "edit_token": edit_token, "invoice": payload}))
+    # Existing-request manager keeps its edit-token authorization path.
+    pdf, payload = _pdf_payload(booking)
+    result = _with_local_pdf(_post("retry_documents", {"booking_id": booking["booking_id"],
+                           "edit_token": edit_token, "invoice": payload}), pdf)
     return SaveResult(ok=bool(result.get("ok")), saved=bool(result.get("saved")),
                       message=str(result.get("error") or result.get("message") or ""), data=result)
 
 def save_to_google_sheets(booking: dict, max_attempts: int = 3, edit_context: dict | None = None) -> SaveResult:
+    """Fast path: validate, reserve inventory and save the booking row only.
+
+    PDF generation, Drive storage and customer email are deliberately separated
+    so they cannot delay the user's reservation confirmation.
+    """
     record = dict(booking)
     revision = int(record.get("revision", 1))
     record["invoice_no"] = "INV-" + record["booking_id"].removeprefix("ITKF-") + (f"-R{revision}" if revision > 1 else "")
     record["invoice_verification_code"] = _verification_code(_secret("BOOKING_API_TOKEN"), record)
     record["status"] = "Request received"
-    pdf, payload = _pdf_payload(record)
-    body = {"booking": record, "invoice": payload}
+    body = {"booking": record}
     if edit_context:
         body.update({key: edit_context[key] for key in ("edit_token", "expected_revision", "edit_operation_id")})
-    result = _decode_pdf(_post("amend_booking" if edit_context else "create_booking", body, attempts=max_attempts))
+    result = _post("amend_booking" if edit_context else "create_booking", body, attempts=max_attempts)
     saved = bool(result.get("saved"))
     if saved:
         result.setdefault("invoice_no", record["invoice_no"])
         result.setdefault("invoice_verification_code", record["invoice_verification_code"])
-        # If Drive is pending, the same numbered local PDF can still be downloaded.
-        if not result.get("invoice_created") and pdf:
-            result["_invoice_pdf_bytes"] = pdf
     return SaveResult(ok=bool(result.get("ok")) and saved, saved=saved,
                       message=str(result.get("error") or result.get("message") or ""), data=result)
