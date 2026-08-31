@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import html
 import io
+from functools import lru_cache
 import re
 import secrets
 from pathlib import Path
+from PIL import Image as PILImage
 from typing import Any
 from datetime import date as date_cls, timedelta
 
@@ -83,6 +85,17 @@ def _money(value: Any, currency: str) -> str:
         return f"{currency} 0.00"
 
 
+@lru_cache(maxsize=12)
+def _optimized_logo_png(path_text: str, modified_ns: int) -> bytes:
+    """Losslessly resize a logo for PDF embedding; original files stay untouched."""
+    path = Path(path_text)
+    with PILImage.open(path) as image:
+        image.thumbnail((360, 360), PILImage.Resampling.LANCZOS)
+        output = io.BytesIO()
+        image.save(output, format="PNG", optimize=True, compress_level=9)
+        return output.getvalue()
+
+
 def _logo_banner() -> Table | None:
     """Build a centered three-logo row while preserving image proportions."""
 
@@ -94,7 +107,8 @@ def _logo_banner() -> Table | None:
         if not path.is_file():
             continue
         try:
-            logo = RLImage(str(path))
+            optimized = _optimized_logo_png(str(path), path.stat().st_mtime_ns)
+            logo = RLImage(io.BytesIO(optimized))
             scale = min(max_width / logo.imageWidth, max_height / logo.imageHeight)
             logo.drawWidth = logo.imageWidth * scale
             logo.drawHeight = logo.imageHeight * scale

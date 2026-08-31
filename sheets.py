@@ -50,33 +50,40 @@ def _check_version(url: str) -> dict | None:
         return {"error_code": "CONNECTION", "error": "The booking service is unavailable. Check the Web App /exec URL and access settings, then retry."}
     return None
 
-def _post(action: str, body: dict, attempts: int = 3) -> dict:
+def _timeout_for(action: str) -> tuple[int, int]:
+    """Use short, action-specific timeouts so a slow backend never looks frozen."""
+    if action in {"check_availability", "check_all_availability", "booking_status"}:
+        return (5, 15)
+    if action in {"create_booking", "amend_booking"}:
+        return (5, 18)
+    if action in {"process_documents", "retry_documents"}:
+        return (5, 30)
+    return (5, 20)
+
+
+def _post(action: str, body: dict, attempts: int = 1) -> dict:
     if not backend_is_configured():
         return {"ok": False, "saved": False, "error": "Set GOOGLE_APPS_SCRIPT_URL and BOOKING_API_TOKEN in Streamlit Secrets."}
     url = _url()
-    # Every authenticated POST carries schema_version and Apps Script validates
-    # it before dispatch. Avoid a separate GET preflight here: on final submit
-    # it would add a full network round trip before both the reservation write
-    # and the document-processing call. _check_version remains available for
-    # diagnostics, while live requests rely on the same authoritative POST check.
     payload = {"schema_version": APP_SCHEMA_VERSION, "action": action,
                "token": _secret("BOOKING_API_TOKEN"), **body}
+    timeout = _timeout_for(action)
     for attempt in range(attempts):
         try:
-            response = requests.post(url, json=payload, timeout=(10, 55))
+            response = requests.post(url, json=payload, timeout=timeout)
             if response.status_code == 429 or response.status_code >= 500:
                 raise requests.RequestException("Temporary backend response.")
             response.raise_for_status()
             result = response.json()
             if not isinstance(result, dict):
                 raise ValueError("Invalid response.")
-            if not result.get("retryable") or attempt == attempts-1:
+            if not result.get("retryable") or attempt == attempts - 1:
                 return result
         except (requests.RequestException, ValueError):
-            if attempt == attempts-1:
+            if attempt == attempts - 1:
                 return {"ok": False, "saved": False, "error_code": "CONNECTION",
-                        "error": "No final response was received. Your request may already be saved. Retry this same request to check it safely."}
-        time.sleep(min(0.6 * 2**attempt + random.uniform(0,0.2), 3))
+                        "error": "No final response was received. Your request may already be saved. The app will check the same Request ID before retrying."}
+        time.sleep(min(0.4 * 2**attempt + random.uniform(0, 0.15), 1.5))
     return {"ok": False, "saved": False, "error": "Retry this request."}
 
 def check_availability(booking: dict, edit_token: str = "") -> dict:
@@ -138,10 +145,12 @@ def _with_local_pdf(result: dict, pdf: bytes | None) -> dict:
             result["invoice_read_error"] = "The saved PDF verification did not match. Retry PDF / email or contact the organizer."
     return result
 
-def process_saved_documents(booking: dict, edit_token: str = "", force_check: bool = False) -> SaveResult:
-    """Create/store/email documents after the booking row is already durably saved."""
+def process_saved_documents(booking: dict, edit_token: str = "", force_check: bool = False,
+                            defer_email: bool = True) -> SaveResult:
+    """Store the protected PDF after save; normal email delivery is queued."""
     pdf, payload = _pdf_payload(booking)
-    body = {"booking_id": booking["booking_id"], "invoice": payload, "force_check": bool(force_check)}
+    body = {"booking_id": booking["booking_id"], "invoice": payload,
+            "force_check": bool(force_check), "defer_email": bool(defer_email)}
     if edit_token:
         body["edit_token"] = edit_token
     result = _with_local_pdf(_post("process_documents", body, attempts=1), pdf)
@@ -156,7 +165,7 @@ def retry_request_documents(booking: dict, edit_token: str) -> SaveResult:
     return SaveResult(ok=bool(result.get("ok")), saved=bool(result.get("saved")),
                       message=str(result.get("error") or result.get("message") or ""), data=result)
 
-def save_to_google_sheets(booking: dict, max_attempts: int = 3, edit_context: dict | None = None) -> SaveResult:
+def save_to_google_sheets(booking: dict, max_attempts: int = 2, edit_context: dict | None = None) -> SaveResult:
     """Fast path: validate, reserve inventory and save the booking row only.
 
     PDF generation, Drive storage and customer email are deliberately separated
@@ -170,7 +179,20 @@ def save_to_google_sheets(booking: dict, max_attempts: int = 3, edit_context: di
     body = {"booking": record}
     if edit_context:
         body.update({key: edit_context[key] for key in ("edit_token", "expected_revision", "edit_operation_id")})
-    result = _post("amend_booking" if edit_context else "create_booking", body, attempts=max_attempts)
+    action = "amend_booking" if edit_context else "create_booking"
+    # First attempt is intentionally single-shot. If the network response is
+    # lost, query the same durable Request ID before repeating a write. This
+    # avoids several long create requests while preserving idempotent retries.
+    result = _post(action, body, attempts=1)
+    if not result.get("saved") and result.get("error_code") == "CONNECTION":
+        status = _post("booking_status", {"booking_id": record["booking_id"],
+                                          "expected_revision": revision,
+                                          "invoice_no": record["invoice_no"],
+                                          "email": record["email"]}, attempts=1)
+        if status.get("saved"):
+            result = status
+        elif max_attempts > 1:
+            result = _post(action, body, attempts=1)
     saved = bool(result.get("saved"))
     if saved:
         result.setdefault("invoice_no", record["invoice_no"])

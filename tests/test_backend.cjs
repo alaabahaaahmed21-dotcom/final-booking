@@ -7,6 +7,19 @@ class Range {
   getValues(){return Array.from({length:this.n},(_,i)=>Array.from({length:this.m},(_,j)=>this.sheet.data[this.r+i-1]?.[this.c+j-1]??''));}
   setValues(values){assert.equal(values.length,this.n);values.forEach((row,i)=>{assert.equal(row.length,this.m);this.sheet.data[this.r+i-1]??=[];row.forEach((v,j)=>{this.sheet.data[this.r+i-1][this.c+j-1]=typeof v==='string'&&v.startsWith("'")?v.slice(1):v;});});return this;}
   setNumberFormat(){return this;} setFontWeight(){return this;} setBackground(){return this;} setFontColor(){return this;}
+  createTextFinder(text){
+    const range=this;
+    return {
+      matchEntireCell(){return this;},
+      findNext(){
+        for(let i=0;i<range.n;i++) for(let j=0;j<range.m;j++) {
+          const value=range.sheet.data[range.r+i-1]?.[range.c+j-1]??'';
+          if(String(value)===String(text)) return {getRow:()=>range.r+i,getColumn:()=>range.c+j};
+        }
+        return null;
+      }
+    };
+  }
 }
 class Sheet {
   constructor(){this.data=[];this.cols=26;this.rows=1000;}
@@ -16,15 +29,17 @@ class Sheet {
   insertColumnsAfter(_,n){this.cols+=n;} insertRowsAfter(_,n){this.rows+=n;}
   setFrozenRows(){} getRange(...args){return new Range(this,...args);}
 }
-const sheets={},files=new Map(),emails=[];let locked=false,busy=false,quota=100,emailCount=0,seq=0;
+const sheets={},files=new Map(),emails=[],cache=new Map(),triggers=[];let locked=false,busy=false,quota=100,emailCount=0,seq=0;
 const blob=(bytes,mime,name)=>({getBytes:()=>Array.from(bytes),setName:()=>blob(bytes,mime,name)});
 const ss={getSheetByName:n=>sheets[n],insertSheet:n=>(sheets[n]=new Sheet()),getSpreadsheetTimeZone:()=> 'Etc/UTC'};
 const folder={getFilesByName:name=>{const found=[...files.values()].filter(f=>f.name===name);return{hasNext:()=>!!found.length,next:()=>found.shift()};},createFile:b=>{
-  const id='file'+(++seq), name=b.name;const f={name,getId:()=>id,getUrl:()=>`private:${id}`,getBlob:()=>b};files.set(id,f);return f;
+  const id='file'+(++seq), name=b.name;const f={name,getId:()=>id,getUrl:()=>`private:${id}`,getBlob:()=>b,setTrashed:()=>{files.delete(id);}};files.set(id,f);return f;
 }};
 const ctx={console,Date,Math,JSON,Object,Array,Number,String,Boolean,Error,Infinity,isFinite,
   PropertiesService:{getScriptProperties:()=>({getProperty:n=>({SPREADSHEET_ID:'test-sheet',BOOKING_API_TOKEN:'test-token',INVOICE_FOLDER_ID:'test-folder'}[n]??null)})},
   LockService:{getScriptLock:()=>({tryLock:()=>{if(busy||locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
+  CacheService:{getScriptCache:()=>({get:key=>cache.get(key)||null,put:(key,value)=>cache.set(key,value),remove:key=>cache.delete(key)})},
+  ScriptApp:{getProjectTriggers:()=>triggers,newTrigger:name=>({timeBased(){return this;},everyMinutes(){return this;},create(){const t={getHandlerFunction:()=>name};triggers.push(t);return t;}})},
   SpreadsheetApp:{openById:()=>ss,flush:()=>{}},
   DriveApp:{getFolderById:()=>folder,getFileById:id=>{if(!files.has(id))throw Error('File missing');return files.get(id);}},
   MailApp:{getRemainingDailyQuota:()=>quota,sendEmail:message=>{emails.push(message);emailCount++;quota--; }},
@@ -203,7 +218,7 @@ let latest=call('loadRequest_',edited.booking_id,token);
 const missingFile=all('Bookings').find(r=>r['Booking ID']===edited.booking_id)['Invoice File ID'];files.delete(missingFile);
 latest=call('loadRequest_',edited.booking_id,token);assert(latest.invoice_read_error);
 const repaired=call('processDocuments_',latest.booking,invoice(latest.booking));
-assert(repaired.invoice_base64);assert(repaired.customer_email_sent);assert.equal(repaired.revision,2);
+assert(repaired.invoice_created);assert(repaired.customer_email_sent);assert.equal(repaired.revision,2);
 failure('EDIT_CONFLICT',()=>call('updateDocument_',latest.booking,'old-lease',{'Customer Email Sent':false}));
 // Quota failures preserve the revised request and can be retried after reopening.
 const third=clone(edited);third.rooms[0].quantity=3;third.revision=3;third.grand_total_eur+=100;
@@ -236,4 +251,15 @@ failure('EDIT_AUTH',()=>call('loadRequest_',edited.booking_id,token));
 call('updateBooking_',person.booking_id,{Status:'Cancelled'});
 assert(!call('loadRequest_',person.booking_id,personToken).editable);
 failure('EDIT_CLOSED',()=>call('amendBooking_',personal,{}, {edit_token:personToken,expected_revision:2,edit_operation_id:'f'.repeat(32)}));
+// v5.5 fast completion: Web App save returns before MailApp; protected PDF is
+// stored first and the installed trigger delivers the pending email later.
+quota=1000;
+const queued=changed(fixture,'13');queued.check_in='2026-12-10';queued.check_out='2026-12-12';
+const queuedCreate=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',action:'create_booking',booking:queued})}});
+assert(queuedCreate.saved);assert(!queuedCreate.invoice_created);
+const queuedDocs=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',action:'process_documents',booking_id:queued.booking_id,invoice:invoice(queued),defer_email:true})}});
+assert(queuedDocs.saved);assert(queuedDocs.invoice_created);assert(!queuedDocs.customer_email_sent);
+assert(triggers.some(t=>t.getHandlerFunction()==='retryPendingEmails'));
+call('retryPendingEmails');
+assert(all('Bookings').find(r=>r['Booking ID']===queued.booking_id)['Customer Email Sent']);
 console.log('PASS backend: schemas, parity, quotas, retries, passport uniqueness, room holds, OTP, amendments, revisions, recovery, conflict protection');
