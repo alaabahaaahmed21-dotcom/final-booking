@@ -58,7 +58,7 @@ def _post(action: str, body: dict, attempts: int = 3) -> dict:
     # schema_version and Apps Script rejects mismatches before dispatching the
     # action, so an extra GET version probe would only double network latency.
     # Keep the friendly preflight for lower-frequency write/edit operations.
-    if action != "check_availability":
+    if action not in {"check_availability", "check_all_availability"}:
         problem = _check_version(url)
         if problem:
             return {"ok": False, "saved": False, **problem}
@@ -84,6 +84,19 @@ def _post(action: str, body: dict, attempts: int = 3) -> dict:
 
 def check_availability(booking: dict, edit_token: str = "") -> dict:
     return _post("check_availability", {"booking": booking, "edit_token": edit_token}, attempts=1)
+
+def check_all_availability(check_in: str, check_out: str, booking_id: str = "", edit_token: str = "") -> dict:
+    """Fetch remaining inventory for every configured hotel in one backend request."""
+    return _post(
+        "check_all_availability",
+        {
+            "check_in": check_in,
+            "check_out": check_out,
+            "booking_id": booking_id,
+            "edit_token": edit_token,
+        },
+        attempts=1,
+    )
 
 def request_edit_code(booking_id: str, email: str) -> dict:
     # Never automatically resend an OTP on a lost network response.
