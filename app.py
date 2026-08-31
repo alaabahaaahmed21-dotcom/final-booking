@@ -794,11 +794,84 @@ def booking_from_state():
     return raw
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def _cached_room_availability(hotel: str, meal_plan: str, check_in: str, check_out: str,
+                              booking_id: str = "", edit_token: str = "") -> dict:
+    """Return live remaining rooms for every priced room type for this stay.
+
+    A short cache avoids hitting Apps Script on every harmless Streamlit rerun.
+    The final save is still protected by the backend lock and performs a fresh
+    availability check, so cached display data can never oversell inventory.
+    """
+    room_types = list(HOTELS[hotel]["rates"][meal_plan])
+    probe = {
+        "hotel": hotel,
+        "meal_plan": meal_plan,
+        "check_in": check_in,
+        "check_out": check_out,
+        "rooms": [{"room_type": room, "quantity": 1} for room in room_types],
+    }
+    if booking_id:
+        probe["booking_id"] = booking_id
+    result = check_availability(probe, edit_token) if edit_token else check_availability(probe)
+    if not result.get("ok"):
+        return result
+    return {
+        "ok": True,
+        "remaining": {
+            item["room_type"]: max(0, int(item.get("remaining", 0)))
+            for item in result.get("availability", [])
+        },
+    }
+
+
+def live_room_availability() -> tuple[dict[str, int], str]:
+    """Get displayed room availability, with configured capacity as safe UI fallback."""
+    hotel = st.session_state.hotel
+    meal_plan = st.session_state.meal_plan
+    rates = HOTELS[hotel]["rates"][meal_plan]
+    fallback = {room: max(0, int(ROOM_INVENTORY.get(hotel, {}).get(room, 0))) for room in rates}
+
+    check_in = st.session_state.check_in
+    check_out = st.session_state.check_out
+    if not isinstance(check_in, date) or not isinstance(check_out, date) or check_out <= check_in:
+        return fallback, "Choose valid check-in and check-out dates to see live availability."
+    if not backend_is_configured():
+        return fallback, "Live availability is temporarily unavailable; shown counts are the room allotment limits."
+
+    edit_context = st.session_state.edit_context or {}
+    edit_token = str(edit_context.get("edit_token", ""))
+    booking_id = ""
+    if st.session_state.edit_original:
+        booking_id = str(st.session_state.edit_original.get("booking_id", ""))
+
+    result = _cached_room_availability(
+        hotel, meal_plan, check_in.isoformat(), check_out.isoformat(), booking_id, edit_token
+    )
+    if not result.get("ok"):
+        return fallback, result.get("error", "Unable to load live room availability right now.")
+    remaining = result.get("remaining", {})
+    return {room: int(remaining.get(room, 0)) for room in rates}, ""
+
+
 def validate_page(page):
     if page == "Personal":
         return validate_personal_fields(booking_from_state())
     if page == "Hotel":
-        return validate_hotel_fields(booking_from_state())
+        raw = booking_from_state()
+        errors = validate_hotel_fields(raw)
+        if not errors:
+            available, _ = live_room_availability()
+            unavailable = []
+            for room in raw.get("rooms", []):
+                remaining = int(available.get(room["room_type"], 0))
+                if int(room.get("quantity", 0)) > remaining:
+                    unavailable.append(
+                        f"{room['room_type']}: only {remaining} room(s) available for these dates."
+                    )
+            if unavailable:
+                errors["rooms"] = " ".join(unavailable)
+        return errors
     errors = {}
     if page != "Transportation" or not st.session_state.wants_transportation:
         return errors
@@ -1112,46 +1185,57 @@ elif page == "Hotel":
         if info.get("notes"):
             st.write(info["notes"])
     input_field("radio", "Meal Plan *", list(info["rates"]), key="meal_plan", horizontal=True, on_change=normalize_hotel_state)
-    rates = info["rates"][st.session_state.meal_plan]
-    inventory = ROOM_INVENTORY.get(st.session_state.hotel, {})
-    if st.session_state.registration_type == "Individual":
-        room_options = [room for room in rates if inventory.get(room, 0) > 0]
-        if not room_options:
-            st.error("No room types are currently allocated for this hotel.")
-        else:
-            if st.session_state.room_type not in room_options:
-                st.session_state.room_type = room_options[0]
-            input_field("selectbox", "Room Type *", room_options, key="room_type")
-            st.info(f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]}")
-    else:
-        for room, rate in rates.items():
-            capacity = int(inventory.get(room, 0))
-            key = room_key(room)
-            st.session_state[key] = min(int(st.session_state.get(key, 0)), capacity)
-            input_field("number_input", f"{room} — {format_currency(rate)} / room / night", min_value=0,
-                            max_value=capacity, step=1, key=room_key(room),
-                            disabled=capacity == 0)
-            if capacity == 0:
-                st.caption(f"{room}: currently unavailable.")
-        st.caption("Guests (automatic): " + str(sum(r["quantity"] * ROOM_OCCUPANCY[r["room_type"]] for r in selected_rooms())))
-    field_error("rooms")
+
+    # Availability depends on the stay dates, so dates come before room selection.
     left, right = st.columns(2)
     input_field("date_input", "Check-in Date *", key="check_in", container=left, format="YYYY-MM-DD")
     input_field("date_input", "Check-out Date *", key="check_out", container=right, format="YYYY-MM-DD")
-    raw = booking_from_state()
-    try:
-        totals = calculate_booking_totals({**raw, "transport_services": []})
-        st.info(f"Number of nights: {totals['nights']} · Number of rooms: {totals['room_count']}")
-        render_price_box(totals)
-        if st.button("Check room availability", disabled=not backend_is_configured(), use_container_width=True):
-            result = check_availability(raw, st.session_state.edit_context["edit_token"]) if st.session_state.edit_context else check_availability(raw)
-            if result.get("ok"):
-                for room in result["availability"]:
-                    st.write(f"{room['room_type']}: {room['remaining']} room(s) available throughout this stay.")
-            else:
-                st.error(result.get("error", "Unable to check availability."))
-    except (ValueError, TypeError, KeyError) as exc:
-        st.error(str(exc))
+
+    rates = info["rates"][st.session_state.meal_plan]
+    available, availability_note = live_room_availability()
+    if availability_note:
+        st.caption(availability_note)
+
+    if st.session_state.registration_type == "Individual":
+        room_options = [room for room in rates if available.get(room, 0) > 0]
+        sold_out = [room for room in rates if available.get(room, 0) <= 0]
+        if not room_options:
+            st.error("No rooms are available for the selected hotel and dates.")
+        else:
+            if st.session_state.room_type not in room_options:
+                st.session_state.room_type = room_options[0]
+            input_field(
+                "selectbox", "Room Type *", room_options, key="room_type",
+                format_func=lambda room: f"{room} — {available.get(room, 0)} room(s) available"
+            )
+            st.info(
+                f"Available now: {available.get(st.session_state.room_type, 0)} room(s) · "
+                f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]}"
+            )
+        if sold_out:
+            st.caption("Sold out for these dates: " + ", ".join(sold_out) + ".")
+    else:
+        for room, rate in rates.items():
+            remaining = max(0, int(available.get(room, 0)))
+            key = room_key(room)
+            st.session_state[key] = min(int(st.session_state.get(key, 0)), remaining)
+            input_field(
+                "number_input",
+                f"{room} — {format_currency(rate)} / room / night — {remaining} available",
+                min_value=0, max_value=remaining, step=1, key=key, disabled=remaining == 0
+            )
+        st.caption("Guests (automatic): " + str(sum(r["quantity"] * ROOM_OCCUPANCY[r["room_type"]] for r in selected_rooms())))
+
+    field_error("rooms")
+    can_quote_rooms = not (st.session_state.registration_type == "Individual" and not room_options)
+    if can_quote_rooms:
+        raw = booking_from_state()
+        try:
+            totals = calculate_booking_totals({**raw, "transport_services": []})
+            st.info(f"Number of nights: {totals['nights']} · Number of rooms: {totals['room_count']}")
+            render_price_box(totals)
+        except (ValueError, TypeError, KeyError) as exc:
+            st.error(str(exc))
     render_step_navigation(back="Personal", next_page="Transportation")
 
 elif page == "Transportation":
