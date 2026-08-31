@@ -58,26 +58,6 @@ HOTELS = {
             "Half Board": {"Single": 95.0, "Double": 60.0, "Triple": 50.0},
         },
     },
-    "Hilton Cairo Heliopolis": {
-        "stars": 5,
-        "distance_to_arena": "15 min by car",
-        "location": "Heliopolis, Cairo - El-Orouba / Qism El-Nozha",
-        "website": "https://www.hilton.com/en/hotels/caihehi-hilton-cairo-heliopolis/",
-        "notes": "",
-        "rates": {
-            "Breakfast": {"Single": 190.0, "Double": 110.0},
-        },
-    },
-    "Sonesta Hotel Tower & Casino Cairo": {
-        "stars": 5,
-        "distance_to_arena": "6 min by car / 15 min walk",
-        "location": "Nasr City, Cairo - 3 El Tayran Street",
-        "website": "https://www.sonesta.com/sonesta-hotels-resorts/cairo-governorate/nasr-city-cairo/sonesta-hotel-tower-casino-cairo",
-        "notes": "",
-        "rates": {
-            "Half Board": {"Single": 185.0, "Double": 110.0, "Triple": 93.0},
-        },
-    },
     "Baron Hotel Cairo": {
         "stars": 4,
         "distance_to_arena": "10 min by car / 30 min walk",
@@ -144,6 +124,16 @@ HOTELS = {
             "Breakfast": {"Single": 70.0, "Double": 45.0},
         },
     },
+    "Royal Marshal Hotel": {
+        "stars": 3,
+        "distance_to_arena": "To be confirmed",
+        "location": "4 A El Khalifa El Maamoun Street, Roxy, Heliopolis, Cairo",
+        "website": "https://www.royalmarshalhotel.com/",
+        "notes": "",
+        "rates": {
+            "Breakfast": {"Single": 47.5, "Double": 65.0},
+        },
+    },
 }
 
 ROOM_OCCUPANCY = {
@@ -154,13 +144,28 @@ ROOM_OCCUPANCY = {
     "Suite (2 rooms / 4 persons)": 4,
 }
 
+# Official room allotment supplied by the organizer.  These are capacity
+# ceilings per night; the backend derives remaining rooms by subtracting
+# active overlapping requests. A dash in the source table is represented as 0
+# only when that room type is still present in the current rate catalogue.
+ROOM_INVENTORY = {
+    "Tiba Rose El Golf": {"Single": 4, "Double": 4, "Triple": 4},
+    "Baron Hotel Cairo": {"Single": 10, "Double": 10, "Triple": 10, "Quadruple": 10},
+    "Armor House Hotel, Cairo": {"Single": 7, "Double": 8, "Suite (2 rooms / 4 persons)": 25},
+    "Hotel El Forsan": {"Single": 10, "Double": 50, "Triple": 0},
+    "Hotel Jewel Elnasr": {"Single": 19, "Double": 47, "Triple": 5, "Quadruple": 4},
+    "Hotel Infantry House": {"Single": 25, "Double": 25, "Quadruple": 20},
+    "Hotel Engineering Authority House": {"Single": 6, "Double": 60, "Quadruple": 40},
+    "Royal Marshal Hotel": {"Single": 10, "Double": 30},
+}
+
 
 # ---------------------------------------------------------------------------
 # Transportation - final approved quotation. EUR per complete vehicle.
 # Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
 # All prices include 14% VAT: never add it a second time.
 # ---------------------------------------------------------------------------
-APP_SCHEMA_VERSION = "2026-08-31-v4"
+APP_SCHEMA_VERSION = "2026-08-31-v5"
 TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
     "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,
@@ -185,6 +190,3 @@ TRANSPORTATION = {
 MAX_BOOKING_NIGHTS = 60
 MAX_TRANSPORT_SERVICES = 60
 DEFAULT_COUNTRY_CODE = "EG"
-# Initial INTERNAL request allocation per room type per night.
-# Backend Inventory sheet is authoritative once setupSheetsNow has run.
-DEFAULT_ROOM_ALLOTMENT = 10

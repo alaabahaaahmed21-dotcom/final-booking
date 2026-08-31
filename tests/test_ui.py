@@ -69,7 +69,7 @@ class WizardTests(unittest.TestCase):
         with patch('config.APP_SCHEMA_VERSION','2026-08-30-v2'):
             self.at=AppTest.from_file(str(ROOT/'app.py'),default_timeout=10).run()
             self.clean()
-            self.assertTrue(any('matching v4 config.py' in item.value for item in self.at.error))
+            self.assertTrue(any('matching v5 config.py' in item.value for item in self.at.error))
             self.assertFalse(list(self.at.button))
 
     def test_old_helpers_module_in_memory_does_not_break_app(self):
@@ -314,7 +314,7 @@ class WizardTests(unittest.TestCase):
         self.widget('selectbox',prefix+'date_mode').select('One date').run()
         self.page('Hotel')
         self.widget('number_input','rq_Tiba Rose El Golf_Double').set_value(3).run()
-        self.widget('selectbox','hotel').select('Hilton Cairo Heliopolis').run()
+        self.widget('selectbox','hotel').select('Baron Hotel Cairo').run()
         self.widget('selectbox','hotel').select('Tiba Rose El Golf').run()
         self.assertEqual(self.widget('number_input','rq_Tiba Rose El Golf_Double').value,3)
         self.page('Transportation')

@@ -1,10 +1,10 @@
 /**
- * ITKF request backend v4. Existing Bookings/Invoices rows are preserved.
+ * ITKF request backend v5. Existing Bookings/Invoices rows are preserved.
  * Properties: SPREADSHEET_ID, BOOKING_API_TOKEN, INVOICE_FOLDER_ID
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-08-31-v4";
+const VERSION = "2026-08-31-v5";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
@@ -41,15 +41,11 @@ const SERVICES = {
   "Daily 8 Hours": {index:2, hours:8, directions:[]},
   "Daily 12 Hours": {index:3, hours:12, directions:[]}
 };
-// Original hotel names and rates retained, using the existing rate per room/night.
+// Current hotel catalogue and official EUR rate per room/night.
 const HOTEL_RATES_EUR = {
   "Tiba Rose El Golf": {
     "Breakfast": {"Single": 80, "Double": 50, "Triple": 45},
     "Half Board": {"Single": 95, "Double": 60, "Triple": 50}
-  },
-  "Hilton Cairo Heliopolis": {"Breakfast": {"Single": 190, "Double": 110}},
-  "Sonesta Hotel Tower & Casino Cairo": {
-    "Half Board": {"Single": 185, "Double": 110, "Triple": 93}
   },
   "Baron Hotel Cairo": {"Breakfast": {"Single": 130, "Double": 75, "Triple": 60}},
   "Armor House Hotel, Cairo": {
@@ -64,7 +60,22 @@ const HOTEL_RATES_EUR = {
   "Hotel Infantry House": {
     "Breakfast": {"Single": 65, "Double": 40, "Quadruple": 30}
   },
-  "Hotel Engineering Authority House": {"Breakfast": {"Single": 70, "Double": 45}}
+  "Hotel Engineering Authority House": {"Breakfast": {"Single": 70, "Double": 45}},
+  "Royal Marshal Hotel": {"Breakfast": {"Single": 47.5, "Double": 65}}
+};
+
+// Official room allotment supplied by the organizer. Capacity is per night.
+// Remaining stock is derived from overlapping active booking rows, so checkout,
+// cancellation and amendments automatically release/recalculate rooms.
+const ROOM_INVENTORY_CAPACITY = {
+  "Tiba Rose El Golf": {"Single":4,"Double":4,"Triple":4},
+  "Baron Hotel Cairo": {"Single":10,"Double":10,"Triple":10,"Quadruple":10},
+  "Armor House Hotel, Cairo": {"Single":7,"Double":8,"Suite (2 rooms / 4 persons)":25},
+  "Hotel El Forsan": {"Single":10,"Double":50,"Triple":0},
+  "Hotel Jewel Elnasr": {"Single":19,"Double":47,"Triple":5,"Quadruple":4},
+  "Hotel Infantry House": {"Single":25,"Double":25,"Quadruple":20},
+  "Hotel Engineering Authority House": {"Single":6,"Double":60,"Quadruple":40},
+  "Royal Marshal Hotel": {"Single":10,"Double":30}
 };
 
 function doGet() { return json_({ok:true,service:"itkf-booking-backend",version:VERSION}); }
@@ -637,23 +648,37 @@ function cellDate_(v) {
   if (v instanceof Date) return Utilities.formatDate(v,SpreadsheetApp.openById(prop_("SPREADSHEET_ID")).getSpreadsheetTimeZone(),"yyyy-MM-dd");
   return iso_(String(v));
 }
+function syncOfficialInventory_(ctx) {
+  const existing=rows_(ctx);
+  Object.keys(ROOM_INVENTORY_CAPACITY).forEach(function(hotel) {
+    Object.keys(ROOM_INVENTORY_CAPACITY[hotel]).forEach(function(room) {
+      const capacity=ROOM_INVENTORY_CAPACITY[hotel][room];
+      const row=existing.find(r=>r.Hotel===hotel && r["Room Type"]===room && r.Date==="*");
+      if (row) writeRow_(ctx,row._row,{"Hotel":hotel,"Room Type":room,"Date":"*","Capacity":capacity},row);
+      else writeRow_(ctx,0,{"Hotel":hotel,"Room Type":room,"Date":"*","Capacity":capacity});
+    });
+  });
+}
 function setupSheetsNow() {
   locked_(function() {
     ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS);
     ensureSheet_(INVOICES_SHEET,INVOICE_HEADERS);
     ensureSheet_(HISTORY_SHEET,HISTORY_HEADERS);
-    const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS), rows=rows_(ctx);
-    Object.keys(HOTEL_RATES_EUR).forEach(function(hotel) {
-      const rooms={}; Object.values(HOTEL_RATES_EUR[hotel]).forEach(plan=>Object.keys(plan).forEach(room=>rooms[room]=true));
-      Object.keys(rooms).forEach(function(room) {
-        if (!rows.some(r=>r.Hotel===hotel && r["Room Type"]===room && r.Date==="*"))
-          writeRow_(ctx,0,{"Hotel":hotel,"Room Type":room,"Date":"*","Capacity":10});
-      });
-    });
+    const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS);
+    syncOfficialInventory_(ctx);
     SpreadsheetApp.flush();
   });
-  console.log("Setup complete. Existing data and existing capacities were preserved.");
+  console.log("Setup complete. Existing bookings were preserved and official room capacities were synchronized.");
 }
+function syncOfficialRoomInventoryNow() {
+  locked_(function() {
+    const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS);
+    syncOfficialInventory_(ctx);
+    SpreadsheetApp.flush();
+  });
+  console.log("Official room capacities synchronized. Date-specific overrides were preserved.");
+}
+
 function diagnoseBackend() {
   prop_("BOOKING_API_TOKEN");
   const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));

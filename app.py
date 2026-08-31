@@ -16,7 +16,7 @@ from typing import Any
 import streamlit as st
 
 from config import (BORDER_COLOR, DEFAULT_COUNTRY_CODE, EVENT_TITLE, HEADER_BG_COLOR,
-    HOTELS, LOGO_PATHS, ROOM_OCCUPANCY, SYSTEM_TITLE, TRANSPORT_SERVICES, TRANSPORTATION,
+    HOTELS, LOGO_PATHS, ROOM_OCCUPANCY, ROOM_INVENTORY, SYSTEM_TITLE, TRANSPORT_SERVICES, TRANSPORTATION,
     APP_SCHEMA_VERSION, MAX_TRANSPORT_SERVICES)
 from countries import countries, countries_by_name, country_for_code, validate_phone
 
@@ -28,15 +28,15 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-08-31-v4":
-    st.error("This app needs the matching v4 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-08-31-v5":
+    st.error("This app needs the matching v5 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
     from sheets import (backend_is_configured, save_to_google_sheets, check_availability,
                         request_edit_code, verify_edit_code, load_request, retry_request_documents)
 except ImportError:
-    st.error("Upload the matching v4 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -1113,13 +1113,26 @@ elif page == "Hotel":
             st.write(info["notes"])
     input_field("radio", "Meal Plan *", list(info["rates"]), key="meal_plan", horizontal=True, on_change=normalize_hotel_state)
     rates = info["rates"][st.session_state.meal_plan]
+    inventory = ROOM_INVENTORY.get(st.session_state.hotel, {})
     if st.session_state.registration_type == "Individual":
-        input_field("selectbox", "Room Type *", list(rates), key="room_type")
-        st.info(f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]}")
+        room_options = [room for room in rates if inventory.get(room, 0) > 0]
+        if not room_options:
+            st.error("No room types are currently allocated for this hotel.")
+        else:
+            if st.session_state.room_type not in room_options:
+                st.session_state.room_type = room_options[0]
+            input_field("selectbox", "Room Type *", room_options, key="room_type")
+            st.info(f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]}")
     else:
         for room, rate in rates.items():
+            capacity = int(inventory.get(room, 0))
+            key = room_key(room)
+            st.session_state[key] = min(int(st.session_state.get(key, 0)), capacity)
             input_field("number_input", f"{room} — {format_currency(rate)} / room / night", min_value=0,
-                            max_value=5000, step=1, key=room_key(room))
+                            max_value=capacity, step=1, key=room_key(room),
+                            disabled=capacity == 0)
+            if capacity == 0:
+                st.caption(f"{room}: currently unavailable.")
         st.caption("Guests (automatic): " + str(sum(r["quantity"] * ROOM_OCCUPANCY[r["room_type"]] for r in selected_rooms())))
     field_error("rooms")
     left, right = st.columns(2)

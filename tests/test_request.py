@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from config import APP_SCHEMA_VERSION, HOTELS, TRANSPORTATION, SYSTEM_TITLE
+from config import APP_SCHEMA_VERSION, HOTELS, ROOM_INVENTORY, TRANSPORTATION, SYSTEM_TITLE
 from helpers import calculate_booking_totals, validate_booking, price_transport_service, normalize_guest_name, normalize_passport_number, vehicle_suggestions, transport_schedule_dates, stay_dates, transport_end_time_options, time_minutes
 from countries import validate_phone
 from pdf_generator import generate_pdf
@@ -96,6 +96,11 @@ class RequestTests(unittest.TestCase):
     def test_exact_new_catalog(self):
         self.assertEqual([v["capacity"] for v in TRANSPORTATION.values()], [3,7,10,26,50])
         self.assertEqual([v["prices_eur"]["Daily 12 Hours"] for v in TRANSPORTATION.values()], [145,170,200,240,400])
+        self.assertNotIn("Hilton Cairo Heliopolis", HOTELS)
+        self.assertNotIn("Sonesta Hotel Tower & Casino Cairo", HOTELS)
+        self.assertEqual(HOTELS["Royal Marshal Hotel"]["rates"]["Breakfast"], {"Single":47.5,"Double":65.0})
+        self.assertEqual(ROOM_INVENTORY["Tiba Rose El Golf"], {"Single":4,"Double":4,"Triple":4})
+        self.assertEqual(ROOM_INVENTORY["Royal Marshal Hotel"], {"Single":10,"Double":30})
     def test_no_photo_required_and_individual_single_room(self):
         b=example("Individual")
         self.assertEqual(validate_booking(b), [])
