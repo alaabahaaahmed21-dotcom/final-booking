@@ -794,35 +794,55 @@ def booking_from_state():
     return raw
 
 
-@st.cache_data(ttl=10, show_spinner=False)
-def _cached_room_availability(hotel: str, meal_plan: str, check_in: str, check_out: str,
-                              booking_id: str = "", edit_token: str = "") -> dict:
-    """Return live remaining rooms for every priced room type for this stay.
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_hotel_availability(hotel: str, check_in: str, check_out: str,
+                               booking_id: str = "", edit_token: str = "") -> dict:
+    """Return live remaining rooms for all priced room types in one hotel.
 
-    A short cache avoids hitting Apps Script on every harmless Streamlit rerun.
-    The final save is still protected by the backend lock and performs a fresh
-    availability check, so cached display data can never oversell inventory.
+    Availability is inventory-based, not meal-plan-based, so the cache key
+    intentionally excludes the meal plan. Switching Breakfast/Half Board/Full
+    Board therefore stays instant when the hotel and dates are unchanged. One
+    backend request checks all room types, and the result is reused for 30
+    seconds across harmless Streamlit reruns. The backend still performs a
+    fresh locked availability check when a booking is saved/amended.
     """
-    room_types = list(HOTELS[hotel]["rates"][meal_plan])
-    probe = {
-        "hotel": hotel,
-        "meal_plan": meal_plan,
-        "check_in": check_in,
-        "check_out": check_out,
-        "rooms": [{"room_type": room, "quantity": 1} for room in room_types],
-    }
-    if booking_id:
-        probe["booking_id"] = booking_id
-    result = check_availability(probe, edit_token) if edit_token else check_availability(probe)
-    if not result.get("ok"):
-        return result
-    return {
-        "ok": True,
-        "remaining": {
-            item["room_type"]: max(0, int(item.get("remaining", 0)))
-            for item in result.get("availability", [])
-        },
-    }
+    plans = HOTELS[hotel]["rates"]
+    room_types = list(dict.fromkeys(
+        room
+        for plan_rates in plans.values()
+        for room in plan_rates
+    ))
+    # check_availability validates a meal plan, so use any plan that contains
+    # every requested room when possible. If plans differ, make the minimum
+    # number of backend calls needed and merge them into one cached result.
+    groups: list[tuple[str, list[str]]] = []
+    uncovered = set(room_types)
+    for plan_name, plan_rates in plans.items():
+        covered = [room for room in plan_rates if room in uncovered]
+        if covered:
+            groups.append((plan_name, covered))
+            uncovered.difference_update(covered)
+        if not uncovered:
+            break
+
+    remaining: dict[str, int] = {}
+    for plan_name, rooms in groups:
+        probe = {
+            "hotel": hotel,
+            "meal_plan": plan_name,
+            "check_in": check_in,
+            "check_out": check_out,
+            "rooms": [{"room_type": room, "quantity": 1} for room in rooms],
+        }
+        if booking_id:
+            probe["booking_id"] = booking_id
+        result = check_availability(probe, edit_token) if edit_token else check_availability(probe)
+        if not result.get("ok"):
+            return result
+        for item in result.get("availability", []):
+            remaining[item["room_type"]] = max(0, int(item.get("remaining", 0)))
+
+    return {"ok": True, "remaining": remaining}
 
 
 def live_room_availability() -> tuple[dict[str, int], str]:
@@ -845,8 +865,8 @@ def live_room_availability() -> tuple[dict[str, int], str]:
     if st.session_state.edit_original:
         booking_id = str(st.session_state.edit_original.get("booking_id", ""))
 
-    result = _cached_room_availability(
-        hotel, meal_plan, check_in.isoformat(), check_out.isoformat(), booking_id, edit_token
+    result = _cached_hotel_availability(
+        hotel, check_in.isoformat(), check_out.isoformat(), booking_id, edit_token
     )
     if not result.get("ok"):
         return fallback, result.get("error", "Unable to load live room availability right now.")
