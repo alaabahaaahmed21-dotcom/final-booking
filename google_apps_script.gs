@@ -1,10 +1,10 @@
 /**
- * ITKF request backend v5.5. Existing Bookings/Invoices rows are preserved.
+ * ITKF request backend v5.5.1. Existing Bookings/Invoices rows are preserved.
  * Properties: SPREADSHEET_ID, BOOKING_API_TOKEN, INVOICE_FOLDER_ID
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-09-01-v5.5";
+const VERSION = "2026-09-01-v5.5.1";
 let SPREADSHEET_CACHE_ = null;
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
@@ -598,6 +598,13 @@ function processDocuments_(b,payload,forceCheck,deferEmail) {
       attachment=file.blob;
       Object.assign(row,changes);
     }
+    // Normal completion queues email so the user is not held on the success page.
+    // Make the queue self-healing: ensure the retry trigger exists automatically.
+    // If trigger creation is unavailable for any reason, fall back to immediate
+    // delivery rather than leaving a saved request permanently without email.
+    if (!truthy_(row["Customer Email Sent"]) && deferEmail) {
+      try { ensureRetryTrigger_(); } catch(e) { deferEmail=false; }
+    }
     if (!truthy_(row["Customer Email Sent"]) && !deferEmail) {
       if (MailApp.getRemainingDailyQuota()<1) throw Error("Daily email quota reached; delivery will be retried.");
       const name=b.federation_name || b.guest_name;
@@ -839,9 +846,16 @@ function retryPendingEmails() {
     try { processDocuments_(JSON.parse(row["Booking JSON"]),{},false,false); } catch(e) { /* Retry on next trigger. */ }
   }
 }
+function ensureRetryTrigger_() {
+  const existing=ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==="retryPendingEmails");
+  if (!existing.length) ScriptApp.newTrigger("retryPendingEmails").timeBased().everyMinutes(1).create();
+  return true;
+}
 function installRetryTrigger() {
-  if (!ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==="retryPendingEmails"))
-    ScriptApp.newTrigger("retryPendingEmails").timeBased().everyMinutes(5).create();
+  // Recreate deliberately so an older 5-minute trigger is upgraded to 1 minute.
+  ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==="retryPendingEmails").forEach(t=>ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger("retryPendingEmails").timeBased().everyMinutes(1).create();
+  console.log("Pending-email retry trigger installed: every 1 minute.");
 }
 function verificationCode_(b) {
   const message=[b.invoice_no,b.booking_id,b.email,Number(b.grand_total_eur).toFixed(2)].join("\n");
