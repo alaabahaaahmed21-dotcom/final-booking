@@ -165,7 +165,7 @@ ROOM_INVENTORY = {
 # Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
 # All prices include 14% VAT: never add it a second time.
 # ---------------------------------------------------------------------------
-APP_SCHEMA_VERSION = "2026-08-31-v5"
+APP_SCHEMA_VERSION = "2026-08-31-v5.3"
 TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
     "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,
