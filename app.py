@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import base64
 import copy
-import io
 import html
 import importlib.util
+import mimetypes
 import json
 from datetime import date, timedelta, time as dt_time
 from pathlib import Path
@@ -14,7 +14,6 @@ import uuid
 from typing import Any
 
 import streamlit as st
-from PIL import Image as PILImage
 
 from config import (BORDER_COLOR, DEFAULT_COUNTRY_CODE, EVENT_TITLE, HEADER_BG_COLOR,
     HOTELS, LOGO_PATHS, ROOM_OCCUPANCY, ROOM_INVENTORY, SYSTEM_TITLE, TRANSPORT_SERVICES, TRANSPORTATION,
@@ -29,8 +28,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-09-01-v5.5.1":
-    st.error("This app needs the matching v5.5.1 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-09-02-v5.5":
+    st.error("This app needs the matching v5.5 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
@@ -38,7 +37,7 @@ try:
                         request_edit_code, verify_edit_code, load_request, retry_request_documents,
                         process_saved_documents)
 except ImportError:
-    st.error("Upload the matching v5.5.1 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5.5 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -445,26 +444,13 @@ button[data-testid="stTooltipIcon"] {{
 )
 
 
-@st.cache_data(show_spinner=False)
-def _cached_logo_data_uri(path_text: str, modified_ns: int) -> str | None:
-    """Return a small lossless display copy while preserving the source logo."""
-    try:
-        path = Path(path_text)
-        with PILImage.open(path) as image:
-            image.thumbnail((360, 360), PILImage.Resampling.LANCZOS)
-            output = io.BytesIO()
-            image.save(output, format="PNG", optimize=True, compress_level=9)
-        encoded = base64.b64encode(output.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
-    except (OSError, ValueError):
-        return None
-
-
 def _logo_data_uri(path: Any) -> str | None:
     try:
         if not path or not path.exists():
             return None
-        return _cached_logo_data_uri(str(path), path.stat().st_mtime_ns)
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
     except OSError:
         return None
 
@@ -580,8 +566,7 @@ def input_field(kind, label, *values, key, container=None, on_change=None, args=
     """Render a temporary widget restored from the independent draft model."""
     widget_key = "_ui_" + key
     st.session_state[widget_key] = copy.deepcopy(st.session_state[key])
-    if key not in st.session_state.rendered_input_keys:
-        st.session_state.rendered_input_keys.append(key)
+    st.session_state.rendered_input_keys.append(key)
     result = getattr(container or st, kind)(label, *values, key=widget_key,
         on_change=input_changed, args=(on_change, args), **kwargs)
     st.session_state[key] = copy.deepcopy(result)
@@ -819,23 +804,17 @@ def booking_from_state():
     return raw
 
 
-class AvailabilityFetchError(RuntimeError):
-    """Raised inside the cache so transient backend failures are never cached."""
-
-
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_all_hotels_availability(check_in: str, check_out: str,
                                     booking_id: str = "", edit_token: str = "") -> dict:
     """Fetch every hotel's remaining room stock in one cached backend call.
 
-    Only successful responses are cached.  A temporary Google/Apps Script error
-    raises and is handled by the caller, so a one-off outage cannot poison the
-    displayed availability for the next 60 seconds.
+    The cache is keyed only by dates plus edit context, not by selected hotel or
+    meal plan. Once a date range is loaded, switching hotels/plans is therefore
+    local and immediate for up to 60 seconds. The backend still performs a
+    fresh locked check when a booking is actually created or amended.
     """
-    result = check_all_availability(check_in, check_out, booking_id, edit_token)
-    if not result.get("ok"):
-        raise AvailabilityFetchError(str(result.get("error") or "Unable to load live room availability right now."))
-    return result
+    return check_all_availability(check_in, check_out, booking_id, edit_token)
 
 
 def all_hotels_availability() -> tuple[dict[str, dict[str, int]], str]:
@@ -858,12 +837,11 @@ def all_hotels_availability() -> tuple[dict[str, dict[str, int]], str]:
     if st.session_state.edit_original:
         booking_id = str(st.session_state.edit_original.get("booking_id", ""))
 
-    try:
-        result = _cached_all_hotels_availability(
-            check_in.isoformat(), check_out.isoformat(), booking_id, edit_token
-        )
-    except AvailabilityFetchError as exc:
-        return fallback, str(exc)
+    result = _cached_all_hotels_availability(
+        check_in.isoformat(), check_out.isoformat(), booking_id, edit_token
+    )
+    if not result.get("ok"):
+        return fallback, result.get("error", "Unable to load live room availability right now.")
 
     raw = result.get("availability_by_hotel", {})
     available: dict[str, dict[str, int]] = {}
@@ -942,6 +920,7 @@ def render_price_box(totals):
         '<hr><b>Total: ' + format_currency(totals["grand_total_eur"]) + '</b></div>',
         unsafe_allow_html=True)
 
+@st.fragment
 def render_hotel_room_selection():
     """Fast room controls: quantity changes rerun only this fragment."""
     info = HOTELS[st.session_state.hotel]
@@ -996,59 +975,6 @@ def render_hotel_room_selection():
             st.error(str(exc))
 
 
-@st.fragment
-def render_hotel_page():
-    """Render the entire Hotel step as one isolated fragment.
-
-    Hotel/date/meal/room changes rerun only this fragment. Navigation buttons
-    deliberately request a full-app rerun after the Hotel draft has been saved
-    and validated, so downstream pages keep the exact same behavior as before.
-    """
-    global page_errors
-    # Callback processing has already captured the previous fragment's widgets.
-    # Start a fresh registry for this fragment render so hidden hotel/room keys
-    # never accumulate across repeated hotel/meal changes.
-    st.session_state.rendered_input_keys = []
-    page_errors = validate_page("Hotel") if "Hotel" in st.session_state.validation_attempts else {}
-    if page_errors:
-        st.error("Please complete or correct the highlighted fields on this page before continuing.")
-
-    section_title("🏨", "Hotel & Rooms", "Choose your rooms and stay dates.")
-    input_field("selectbox", "Select Hotel *", list(HOTELS), key="hotel", on_change=normalize_hotel_state)
-    info = HOTELS[st.session_state.hotel]
-    with st.expander("🏨 Hotel Details"):
-        st.write(f"Stars: {info['stars']} · Distance to Arena: {info['distance_to_arena']}")
-        st.write(info["location"])
-        if info.get("website"):
-            st.markdown(f"[Hotel website]({info['website']})")
-        if info.get("notes"):
-            st.write(info["notes"])
-    input_field("radio", "Meal Plan *", list(info["rates"]), key="meal_plan", horizontal=True, on_change=normalize_hotel_state)
-
-    left, right = st.columns(2)
-    input_field("date_input", "Check-in Date *", key="check_in", container=left, format="YYYY-MM-DD")
-    input_field("date_input", "Check-out Date *", key="check_out", container=right, format="YYYY-MM-DD")
-
-    render_hotel_room_selection()
-
-    st.write("")
-    back_col, next_col = st.columns(2)
-    if back_col.button("← Back", key="back_Hotel", use_container_width=True):
-        save_visible_inputs()
-        st.session_state.current_page = "Personal"
-        st.rerun(scope="app")
-    if next_col.button("Next →", key="next_Hotel", type="primary", use_container_width=True):
-        save_visible_inputs()
-        errors = validate_page("Hotel")
-        if "Hotel" not in st.session_state.validation_attempts:
-            st.session_state.validation_attempts.append("Hotel")
-        page_errors = errors
-        if errors:
-            st.rerun(scope="fragment")
-        st.session_state.current_page = "Transportation"
-        st.rerun(scope="app")
-
-
 def show_summary(raw):
     name = raw.get("federation_name") if raw.get("registration_type") == "Federation" else raw.get("guest_name")
     st.write(f"Registration: {raw.get('registration_type', '-')}")
@@ -1074,30 +1000,13 @@ def show_summary(raw):
         st.write(f"Nights: {totals['nights']} · Guests: {totals['guests']}")
         if totals["transport_services"]:
             st.subheader("Transportation")
-            transport_rows = []
-            for i, service in enumerate(totals["transport_services"], 1):
-                next_day = " (+1)" if service["ends_next_day"] else ""
-                vehicles = "; ".join(
-                    f"{line['vehicle']} × {line['quantity']}" for line in service["vehicle_lines"]
-                )
-                transport_rows.append({
-                    "#": i,
-                    "Date": service["date"],
-                    "Service": service["service"],
-                    "Direction": service.get("direction", "") or "—",
-                    "Time": f"{service['start_time']}–{service['end_time']}{next_day}",
-                    "Passengers": service["persons"],
-                    "Seats": service["seats"],
-                    "Vehicle(s)": vehicles or "—",
-                    "Total": format_currency(service["total_eur"]),
-                })
-            st.dataframe(
-                transport_rows,
-                hide_index=True,
-                use_container_width=True,
-                height=min(420, 38 + 35 * len(transport_rows)),
-            )
-            st.caption("Transportation times are Cairo local time.")
+        for i, service in enumerate(totals["transport_services"], 1):
+            next_day = " (+1 day)" if service["ends_next_day"] else ""
+            st.write(f"{i}. {service['date']} · {service['service']} · {service.get('direction', '')}")
+            st.write(f"{service['start_time']}–{service['end_time']}{next_day} (Cairo time)")
+            st.write(f"Passengers: {service['persons']} · Seats: {service['seats']}")
+            for line in service["vehicle_lines"]:
+                st.write(f"{line['vehicle']} × {line['quantity']} · {format_currency(line['total_eur'])}")
         render_price_box(totals)
     except (ValueError, TypeError, KeyError) as exc:
         st.info(str(exc))
@@ -1116,9 +1025,6 @@ def attempt_save(record):
     booking = {**record, **result.data.get("booking", {}), **result.data}
     st.session_state.last_booking = booking
     st.session_state.submitted_record = booking
-    # A successful reservation changes live stock. Do not leave this browser
-    # showing the pre-booking cached count if the user starts another request.
-    _cached_all_hotels_availability.clear()
     st.session_state.pending_submission = None
     st.session_state.pending_error = ""
     # Each invoice/revision gets one automatic document attempt on the success page.
@@ -1136,13 +1042,7 @@ def process_completion_documents(saved):
     st.session_state.documents_attempted_for_invoice = invoice_no
     edit_token = (st.session_state.edit_context or {}).get("edit_token", "")
     with st.status("Preparing your one-page PDF and email...", expanded=False) as status:
-        force_check = bool(st.session_state.get("document_force_check"))
-        # Normal completion stores the protected PDF immediately, then lets the
-        # Apps Script retry trigger send email outside the user's wait path.
-        # An explicit Retry button still performs email delivery synchronously.
-        result = process_saved_documents(
-            saved, edit_token=edit_token, force_check=force_check, defer_email=not force_check
-        )
+        result = process_saved_documents(saved, edit_token=edit_token, force_check=bool(st.session_state.get("document_force_check")))
         if result.saved:
             updated = {**saved, **result.data.get("booking", {}), **result.data}
             st.session_state.last_booking = updated
@@ -1150,8 +1050,6 @@ def process_completion_documents(saved):
             st.session_state.document_force_check = False
             if updated.get("invoice_created") and updated.get("customer_email_sent"):
                 status.update(label="PDF saved and email sent.", state="complete", expanded=False)
-            elif updated.get("invoice_created") and updated.get("document_status") == "Ready":
-                status.update(label="PDF saved. Email is queued for automatic delivery.", state="complete", expanded=False)
             else:
                 status.update(label="Request saved; PDF/email can be retried safely.", state="complete", expanded=False)
             return updated
@@ -1343,7 +1241,7 @@ if st.session_state.current_page == "Registration":
     st.stop()
 render_navigation()
 page = st.session_state.current_page
-page_errors = validate_page(page) if page != "Hotel" and page in st.session_state.validation_attempts else {}
+page_errors = validate_page(page) if page in st.session_state.validation_attempts else {}
 if page_errors:
     st.error("Please complete or correct the highlighted fields on this page before continuing.")
 if page == "Personal":
@@ -1369,7 +1267,25 @@ if page == "Personal":
     render_step_navigation(back="Manage" if st.session_state.edit_context else "Registration", next_page="Hotel")
 
 elif page == "Hotel":
-    render_hotel_page()
+    section_title("🏨", "Hotel & Rooms", "Choose your rooms and stay dates.")
+    input_field("selectbox", "Select Hotel *", list(HOTELS), key="hotel", on_change=normalize_hotel_state)
+    info = HOTELS[st.session_state.hotel]
+    with st.expander("🏨 Hotel Details"):
+        st.write(f"Stars: {info['stars']} · Distance to Arena: {info['distance_to_arena']}")
+        st.write(info["location"])
+        if info.get("website"):
+            st.markdown(f"[Hotel website]({info['website']})")
+        if info.get("notes"):
+            st.write(info["notes"])
+    input_field("radio", "Meal Plan *", list(info["rates"]), key="meal_plan", horizontal=True, on_change=normalize_hotel_state)
+
+    # Availability depends on the stay dates, so dates come before room selection.
+    left, right = st.columns(2)
+    input_field("date_input", "Check-in Date *", key="check_in", container=left, format="YYYY-MM-DD")
+    input_field("date_input", "Check-out Date *", key="check_out", container=right, format="YYYY-MM-DD")
+
+    render_hotel_room_selection()
+    render_step_navigation(back="Personal", next_page="Transportation")
 
 elif page == "Transportation":
     section_title("🚐", "Transportation", "Whole-vehicle prices in EUR. All times are Cairo local time.")
@@ -1503,15 +1419,9 @@ elif page == "Complete":
             st.warning(saved["invoice_read_error"])
         if saved.get("customer_email_sent"):
             st.success("The PDF was emailed to " + saved["email"])
-        elif saved.get("invoice_created") and saved.get("document_status") == "Ready":
-            st.info("Your protected PDF is saved. The confirmation email is queued for automatic delivery (normally on the next email-queue run).")
         else:
             st.info("Your request is saved. Email delivery is pending.")
-        needs_document_retry = (
-            not saved.get("invoice_created") or bool(saved.get("invoice_read_error")) or
-            (not saved.get("customer_email_sent") and saved.get("document_status") != "Ready")
-        )
-        if needs_document_retry:
+        if not saved.get("invoice_created") or not saved.get("customer_email_sent") or saved.get("invoice_read_error"):
             if st.button("Retry PDF / email", use_container_width=True):
                 st.session_state.documents_attempted_for_invoice = ""
                 st.session_state.document_force_check = True

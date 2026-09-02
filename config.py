@@ -149,7 +149,7 @@ ROOM_OCCUPANCY = {
 # active overlapping requests. A dash in the source table is represented as 0
 # only when that room type is still present in the current rate catalogue.
 ROOM_INVENTORY = {
-    "Tiba Rose El Golf": {"Single": 4, "Double": 4, "Triple": 4},
+    "Tiba Rose El Golf": {"Single": 30, "Double": 50, "Triple": 100, "Quadruple": 20},
     "Baron Hotel Cairo": {"Single": 10, "Double": 10, "Triple": 10, "Quadruple": 10},
     "Armor House Hotel, Cairo": {"Single": 7, "Double": 8, "Suite (2 rooms / 4 persons)": 25},
     "Hotel El Forsan": {"Single": 10, "Double": 50, "Triple": 0},
@@ -164,7 +164,7 @@ ROOM_INVENTORY = {
 # Transportation - final approved quotation. EUR per complete vehicle.
 # Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
 # ---------------------------------------------------------------------------
-APP_SCHEMA_VERSION = "2026-09-01-v5.5.1"
+APP_SCHEMA_VERSION = "2026-09-02-v5.5"
 TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
     "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,

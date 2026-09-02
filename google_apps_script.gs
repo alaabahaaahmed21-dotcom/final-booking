@@ -1,11 +1,10 @@
 /**
- * ITKF request backend v5.5.1. Existing Bookings/Invoices rows are preserved.
+ * ITKF request backend v5. Existing Bookings/Invoices rows are preserved.
  * Properties: SPREADSHEET_ID, BOOKING_API_TOKEN, INVOICE_FOLDER_ID
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-09-01-v5.5.1";
-let SPREADSHEET_CACHE_ = null;
+const VERSION = "2026-09-02-v5.5";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
@@ -69,7 +68,7 @@ const HOTEL_RATES_EUR = {
 // Remaining stock is derived from overlapping active booking rows, so checkout,
 // cancellation and amendments automatically release/recalculate rooms.
 const ROOM_INVENTORY_CAPACITY = {
-  "Tiba Rose El Golf": {"Single":4,"Double":4,"Triple":4},
+  "Tiba Rose El Golf": {"Single":30,"Double":50,"Triple":100,"Quadruple":20},
   "Baron Hotel Cairo": {"Single":10,"Double":10,"Triple":10,"Quadruple":10},
   "Armor House Hotel, Cairo": {"Single":7,"Double":8,"Suite (2 rooms / 4 persons)":25},
   "Hotel El Forsan": {"Single":10,"Double":50,"Triple":0},
@@ -89,71 +88,54 @@ function doPost(e) {
       throw codedError_("UNAUTHORIZED","The booking service credentials do not match.");
     if (req.schema_version !== VERSION) throw codedError_("SCHEMA_VERSION","Update the Apps Script deployment and the application together.");
     if (req.action === "check_availability") {
-      // Display-only availability must never compete with final booking writes
-      // for the global script lock. The final create/amend call still performs
-      // a fresh availability check while holding the lock.
-      const b = accommodation_(req.booking || {});
-      let rows=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS));
-      if (req.edit_token) {
-        const row=authorizedEdit_(req.booking.booking_id,req.edit_token,rows);
-        rows=rows.filter(r=>r._row!==row._row);
-      }
-      return json_({ok:true,availability:availability_(b,rows)});
+      return json_(locked_(function() {
+        const b = accommodation_(req.booking || {});
+        let rows=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS));
+        if (req.edit_token) {
+          const row=authorizedEdit_(req.booking.booking_id,req.edit_token,rows);
+          rows=rows.filter(r=>r._row!==row._row);
+        }
+        return {ok:true,availability:availability_(b,rows)};
+      }));
     }
     if (req.action === "check_all_availability") {
-      const checkIn=iso_(req.check_in), checkOut=iso_(req.check_out);
-      nights_(checkIn,checkOut);
-      const cacheKey="avail-v55|"+checkIn+"|"+checkOut;
-      const cache=CacheService.getScriptCache();
-      if (!req.edit_token) {
-        const cached=cache.get(cacheKey);
-        if (cached) return json_(JSON.parse(cached));
-      }
-      let rows=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS));
-      if (req.edit_token) {
-        const row=authorizedEdit_(req.booking_id,req.edit_token,rows);
-        rows=rows.filter(r=>r._row!==row._row);
-      }
-      const inventory=inventory_(), byHotel={};
-      Object.keys(ROOM_INVENTORY_CAPACITY).forEach(function(hotel) {
-        const rooms=Object.keys(ROOM_INVENTORY_CAPACITY[hotel]);
-        const probe={hotel:hotel,check_in:checkIn,check_out:checkOut,
-          rooms:rooms.map(room=>({room_type:room,quantity:1}))};
-        byHotel[hotel]={};
-        availability_(probe,rows,inventory).forEach(function(item) {
-          byHotel[hotel][item.room_type]=item.remaining;
+      return json_(locked_(function() {
+        const checkIn=iso_(req.check_in), checkOut=iso_(req.check_out);
+        nights_(checkIn,checkOut);
+        let rows=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS));
+        if (req.edit_token) {
+          const row=authorizedEdit_(req.booking_id,req.edit_token,rows);
+          rows=rows.filter(r=>r._row!==row._row);
+        }
+        const inventory=inventory_(), byHotel={};
+        Object.keys(ROOM_INVENTORY_CAPACITY).forEach(function(hotel) {
+          const rooms=Object.keys(ROOM_INVENTORY_CAPACITY[hotel]);
+          const probe={hotel:hotel,check_in:checkIn,check_out:checkOut,
+            rooms:rooms.map(room=>({room_type:room,quantity:1}))};
+          byHotel[hotel]={};
+          availability_(probe,rows,inventory).forEach(function(item) {
+            byHotel[hotel][item.room_type]=item.remaining;
+          });
         });
-      });
-      const response={ok:true,availability_by_hotel:byHotel};
-      if (!req.edit_token) cache.put(cacheKey,JSON.stringify(response),15);
-      return json_(response);
+        return {ok:true,availability_by_hotel:byHotel};
+      }));
     }
     if (req.action === "create_booking") return json_(createBooking_(req.booking || {}, req.invoice || {}));
-    if (req.action === "booking_status") {
-      const id=requestId_(req.booking_id);
-      const row=find_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),"Booking ID",id);
-      if (!row) return json_({ok:true,saved:false,exists:false});
-      if (req.expected_revision && Number(row.Revision||1)!==Number(req.expected_revision))
-        return json_({ok:true,saved:false,exists:true,revision:Number(row.Revision||1)});
-      if ((req.invoice_no && String(row["Invoice No"])!==String(req.invoice_no)) ||
-          (req.email && String(row.Email).trim().toLowerCase()!==String(req.email).trim().toLowerCase()))
-        return json_({ok:true,saved:false,exists:true});
-      return json_(Object.assign(result_(row,"",false),{exists:true}));
-    }
     if (req.action === "request_edit_code") return json_(requestEditCode_(req.booking_id,req.email));
     if (req.action === "verify_edit_code") return json_(verifyEditCode_(req.booking_id,req.email,req.code));
     if (req.action === "load_request") return json_(loadRequest_(req.booking_id,req.edit_token));
     if (req.action === "amend_booking") return json_(amendBooking_(req.booking || {},req.invoice || {},req));
     if (req.action === "process_documents") {
       const id=requestId_(req.booking_id);
-      const row=find_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),"Booking ID",id);
+      const row=locked_(function() {
+        return find_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),"Booking ID",id);
+      });
       if (!row || !row["Booking JSON"]) throw codedError_("SERVER_ERROR","Saved request could not be located.");
-      return json_(processDocuments_(JSON.parse(row["Booking JSON"]),req.invoice || {},
-        truthy_(req.force_check),truthy_(req.defer_email)));
+      return json_(processDocuments_(JSON.parse(row["Booking JSON"]),req.invoice || {},truthy_(req.force_check)));
     }
     if (req.action === "retry_documents") {
       const saved=loadRequest_(req.booking_id,req.edit_token);
-      return json_(processDocuments_(saved.booking,req.invoice || {},true,false));
+      return json_(processDocuments_(saved.booking,req.invoice || {},true));
     }
     if (req.action === "check_duplicate") {
       return json_({ok:true,exists:passportExists_(rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)),req.passport_number)});
@@ -166,7 +148,7 @@ function doPost(e) {
 }
 function locked_(callback) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(7000)) throw codedError_("BUSY","The service is busy. Retry this same request.");
+  if (!lock.tryLock(30000)) throw codedError_("BUSY","The service is busy. Retry this same request.");
   try { return callback(); } finally { lock.releaseLock(); }
 }
 function normalizeGuestName_(v) { return String(v || "").trim().replace(/\s+/g," ").toUpperCase(); }
@@ -395,7 +377,7 @@ function createBooking_(raw,invoice) {
     SpreadsheetApp.flush();
     return {booking:b,row:data};
   });
-  // v5.5 fast completion: the current Streamlit client sends no PDF in this
+  // v5.4 fast completion: the current Streamlit client sends no PDF in this
   // first call, so the durable reservation returns immediately. Legacy callers
   // that still supply a PDF keep the previous all-in-one behavior.
   if (invoice && invoice.base64) {
@@ -488,7 +470,9 @@ function verifyEditCode_(id,email,code) {
   });
 }
 function loadRequest_(id,token) {
-  const row=authorizedEdit_(id,token,rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)));
+  const row=locked_(function() {
+    return authorizedEdit_(id,token,rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)));
+  });
   const b=JSON.parse(row["Booking JSON"]);
   b.revision=Number(row.Revision||b.revision||1);
   b.updated_at=row["Updated At"]||b.updated_at||b.booking_date;
@@ -547,7 +531,7 @@ function amendBooking_(raw,invoice,req) {
   }
   return result_(saved.row,"The changes were saved. PDF/email processing is pending.",false);
 }
-function processDocuments_(b,payload,forceCheck,deferEmail) {
+function processDocuments_(b,payload,forceCheck) {
   const lease=locked_(function() {
     const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), row=find_(ctx,"Booking ID",b.booking_id);
     if (!row) throw codedError_("SERVER_ERROR","Saved request could not be located.");
@@ -561,11 +545,8 @@ function processDocuments_(b,payload,forceCheck,deferEmail) {
     // repairable without creating another booking revision.
     if (row["Invoice File ID"] && truthy_(row["Customer Email Sent"])) {
       if (!forceCheck) return {done:true,row:row};
-      try {
-        const bytes=DriveApp.getFileById(row["Invoice File ID"]).getBlob().getBytes();
-        const digest=digestHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes));
-        if (!row["Invoice SHA-256"] || !equal_(digest,row["Invoice SHA-256"])) throw Error("PDF integrity mismatch");
-      } catch(e) {
+      try { DriveApp.getFileById(row["Invoice File ID"]).getBlob().getBytes(); }
+      catch(e) {
         Object.assign(row,{"Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"",
           "Customer Email Sent":false,"Email Sent At":""});
       }
@@ -598,14 +579,7 @@ function processDocuments_(b,payload,forceCheck,deferEmail) {
       attachment=file.blob;
       Object.assign(row,changes);
     }
-    // Normal completion queues email so the user is not held on the success page.
-    // Make the queue self-healing: ensure the retry trigger exists automatically.
-    // If trigger creation is unavailable for any reason, fall back to immediate
-    // delivery rather than leaving a saved request permanently without email.
-    if (!truthy_(row["Customer Email Sent"]) && deferEmail) {
-      try { ensureRetryTrigger_(); } catch(e) { deferEmail=false; }
-    }
-    if (!truthy_(row["Customer Email Sent"]) && !deferEmail) {
+    if (!truthy_(row["Customer Email Sent"])) {
       if (MailApp.getRemainingDailyQuota()<1) throw Error("Daily email quota reached; delivery will be retried.");
       const name=b.federation_name || b.guest_name;
       if (!attachment) {
@@ -751,12 +725,8 @@ function result_(row,message,includePdf) {
   if (row["Booking JSON"]) out.booking=JSON.parse(row["Booking JSON"]);
   return out;
 }
-function spreadsheet_() {
-  if (!SPREADSHEET_CACHE_) SPREADSHEET_CACHE_=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
-  return SPREADSHEET_CACHE_;
-}
 function ensureSheet_(name,required) {
-  const ss=spreadsheet_();
+  const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
   const sheet=ss.getSheetByName(name)||ss.insertSheet(name);
   let headers=sheet.getLastColumn()?sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0].map(String):[];
   const originalLength=headers.length;
@@ -775,15 +745,7 @@ function rows_(ctx) {
     const row={_row:index+2}; ctx.headers.forEach((h,i)=>row[h]=values[i]); return row;
   });
 }
-function find_(ctx,header,value) {
-  const column=ctx.headers.indexOf(header)+1;
-  if (column<1 || ctx.sheet.getLastRow()<2) return undefined;
-  const match=ctx.sheet.getRange(2,column,ctx.sheet.getLastRow()-1,1)
-    .createTextFinder(String(value)).matchEntireCell(true).findNext();
-  if (!match) return undefined;
-  const values=ctx.sheet.getRange(match.getRow(),1,1,ctx.headers.length).getValues()[0];
-  const row={_row:match.getRow()}; ctx.headers.forEach((h,i)=>row[h]=values[i]); return row;
-}
+function find_(ctx,header,value) { return rows_(ctx).find(r=>String(r[header])===String(value)); }
 function writeRow_(ctx,row,data,old) {
   row=row||ctx.sheet.getLastRow()+1;
   if (row>ctx.sheet.getMaxRows()) ctx.sheet.insertRowsAfter(ctx.sheet.getMaxRows(),row-ctx.sheet.getMaxRows());
@@ -795,7 +757,7 @@ function writeRow_(ctx,row,data,old) {
   return row;
 }
 function cellDate_(v) {
-  if (v instanceof Date) return Utilities.formatDate(v,spreadsheet_().getSpreadsheetTimeZone(),"yyyy-MM-dd");
+  if (v instanceof Date) return Utilities.formatDate(v,SpreadsheetApp.openById(prop_("SPREADSHEET_ID")).getSpreadsheetTimeZone(),"yyyy-MM-dd");
   return iso_(String(v));
 }
 function syncOfficialInventory_(ctx) {
@@ -818,8 +780,7 @@ function setupSheetsNow() {
     syncOfficialInventory_(ctx);
     SpreadsheetApp.flush();
   });
-  installRetryTrigger();
-  console.log("Setup complete. Existing bookings were preserved, official room capacities were synchronized, and the pending-email retry trigger is installed.");
+  console.log("Setup complete. Existing bookings were preserved and official room capacities were synchronized.");
 }
 function syncOfficialRoomInventoryNow() {
   locked_(function() {
@@ -832,7 +793,7 @@ function syncOfficialRoomInventoryNow() {
 
 function diagnoseBackend() {
   prop_("BOOKING_API_TOKEN");
-  const ss=spreadsheet_();
+  const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
   DriveApp.getFolderById(optionalProp_("INVOICE_FOLDER_ID") || prop_("DRIVE_FOLDER_ID")).getName();
   console.log(JSON.stringify({version:VERSION,bookings_sheet_exists:Boolean(ss.getSheetByName(BOOKINGS_SHEET)),
     inventory_sheet_exists:Boolean(ss.getSheetByName(INVENTORY_SHEET)),email_quota_remaining:MailApp.getRemainingDailyQuota()}));
@@ -843,19 +804,12 @@ function retryPendingEmails() {
     !truthy_(r["Customer Email Sent"])).slice(0,20);
   for (const row of pending) {
     if (MailApp.getRemainingDailyQuota()<1) break;
-    try { processDocuments_(JSON.parse(row["Booking JSON"]),{},false,false); } catch(e) { /* Retry on next trigger. */ }
+    try { processDocuments_(JSON.parse(row["Booking JSON"]),{}); } catch(e) { /* Retry on next trigger. */ }
   }
 }
-function ensureRetryTrigger_() {
-  const existing=ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==="retryPendingEmails");
-  if (!existing.length) ScriptApp.newTrigger("retryPendingEmails").timeBased().everyMinutes(1).create();
-  return true;
-}
 function installRetryTrigger() {
-  // Recreate deliberately so an older 5-minute trigger is upgraded to 1 minute.
-  ScriptApp.getProjectTriggers().filter(t=>t.getHandlerFunction()==="retryPendingEmails").forEach(t=>ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger("retryPendingEmails").timeBased().everyMinutes(1).create();
-  console.log("Pending-email retry trigger installed: every 1 minute.");
+  if (!ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==="retryPendingEmails"))
+    ScriptApp.newTrigger("retryPendingEmails").timeBased().everyMinutes(5).create();
 }
 function verificationCode_(b) {
   const message=[b.invoice_no,b.booking_id,b.email,Number(b.grand_total_eur).toFixed(2)].join("\n");
