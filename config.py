@@ -54,7 +54,12 @@ HOTELS = {
         "website": "http://www.milhouses.com.eg/dar/DefaultAr.aspx?id=1",
         "notes": "",
         "rates": {
-            "Breakfast": {"Single": 80.0, "Double": 50.0, "Triple": 45.0},
+            "Breakfast": {
+                "Single": 80.0,
+                "Double": 50.0,
+                "Triple": 45.0,
+                "Quadruple": 112.0,
+            },
             "Half Board": {"Single": 95.0, "Double": 60.0, "Triple": 50.0},
         },
     },
@@ -164,7 +169,7 @@ ROOM_INVENTORY = {
 # Transportation - final approved quotation. EUR per complete vehicle.
 # Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
 # ---------------------------------------------------------------------------
-APP_SCHEMA_VERSION = "2026-09-02-v5.5"
+APP_SCHEMA_VERSION = "2026-09-02-v5.6"
 TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
     "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,

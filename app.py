@@ -28,8 +28,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-09-02-v5.5":
-    st.error("This app needs the matching v5.5 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-09-02-v5.6":
+    st.error("This app needs the matching v5.6 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
@@ -37,7 +37,7 @@ try:
                         request_edit_code, verify_edit_code, load_request, retry_request_documents,
                         process_saved_documents)
 except ImportError:
-    st.error("Upload the matching v5.5 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5.6 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 

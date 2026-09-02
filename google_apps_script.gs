@@ -4,7 +4,7 @@
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-09-02-v5.5";
+const VERSION = "2026-09-02-v5.6";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
@@ -44,7 +44,7 @@ const SERVICES = {
 // Current hotel catalogue and official EUR rate per room/night.
 const HOTEL_RATES_EUR = {
   "Tiba Rose El Golf": {
-    "Breakfast": {"Single": 80, "Double": 50, "Triple": 45},
+    "Breakfast": {"Single": 80, "Double": 50, "Triple": 45, "Quadruple": 112},
     "Half Board": {"Single": 95, "Double": 60, "Triple": 50}
   },
   "Baron Hotel Cairo": {"Breakfast": {"Single": 130, "Double": 75, "Triple": 60}},
