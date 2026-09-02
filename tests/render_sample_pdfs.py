@@ -17,5 +17,5 @@ for kind in ('Individual', 'Federation'):
     booking.update(calculate_booking_totals(booking))
     booking.update(invoice_no='INV-20260830-ABCDEF123456-R2', invoice_verification_code='TEST-ONLY-NOT-REAL',
                    revision=2, updated_at='2026-08-31T15:00:00+00:00')
-    (out / f'{kind.lower()}-v4.pdf').write_bytes(generate_pdf(booking))
-    print(out / f'{kind.lower()}-v4.pdf')
+    (out / f'{kind.lower()}-v5.7.pdf').write_bytes(generate_pdf(booking))
+    print(out / f'{kind.lower()}-v5.7.pdf')

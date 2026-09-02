@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
 import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
 import requests
 import streamlit as st
+from pypdf import PdfReader
+from pypdf.errors import PyPdfError
 from config import APP_SCHEMA_VERSION
 from pdf_generator import generate_pdf
 
@@ -109,15 +112,40 @@ def request_edit_code(booking_id: str, email: str) -> dict:
 def verify_edit_code(booking_id: str, email: str, code: str) -> dict:
     return _post("verify_edit_code", {"booking_id": booking_id.strip().upper(), "email": email.strip(), "code": code.strip()}, attempts=1)
 
+def _verify_pdf_bytes(data: bytes, expected_sha256: str = "") -> bytes:
+    """Require a complete, readable PDF before offering it to the user."""
+
+    if (
+        len(data) < 256
+        or len(data) > 5 * 1024 * 1024
+        or not data.startswith(b"%PDF-")
+        or b"%%EOF" not in data[-2048:]
+    ):
+        raise ValueError("Incomplete PDF")
+    actual = hashlib.sha256(data).hexdigest()
+    if expected_sha256 and not hmac.compare_digest(actual, str(expected_sha256)):
+        raise ValueError("PDF hash mismatch")
+    reader = PdfReader(io.BytesIO(data), strict=True)
+    if reader.is_encrypted and not reader.decrypt(""):
+        raise ValueError("PDF password mismatch")
+    if len(reader.pages) < 1:
+        raise ValueError("PDF has no pages")
+    # Access the first page so damaged object tables are detected now, not
+    # after the customer downloads the attachment.
+    _ = reader.pages[0].mediabox
+    return data
+
+
 def _decode_pdf(result: dict) -> dict:
     exact = result.pop("invoice_base64", None)
     if exact:
         try:
             data = base64.b64decode(exact, validate=True)
-            if not data.startswith(b"%PDF-") or hashlib.sha256(data).hexdigest() != result.get("invoice_sha256"):
-                raise ValueError("PDF mismatch")
-            result["_invoice_pdf_bytes"] = data
-        except (ValueError, TypeError):
+            result["_invoice_pdf_bytes"] = _verify_pdf_bytes(
+                data, str(result.get("invoice_sha256") or "")
+            )
+            result.pop("invoice_read_error", None)
+        except (ValueError, TypeError, OSError, PyPdfError):
             result["invoice_read_error"] = "The PDF could not be verified. Retry PDF / email or contact the organizer."
     return result
 
@@ -136,13 +164,17 @@ def _pdf_payload(record: dict) -> tuple[bytes | None, dict]:
 
 def _with_local_pdf(result: dict, pdf: bytes | None) -> dict:
     """Use the locally generated exact PDF instead of downloading it back from Drive."""
+    if result.get("_invoice_pdf_bytes"):
+        return result
     if pdf and result.get("invoice_created"):
         expected = str(result.get("invoice_sha256") or "")
         actual = hashlib.sha256(pdf).hexdigest()
         if not expected or hmac.compare_digest(actual, expected):
-            result["_invoice_pdf_bytes"] = pdf
-        else:
-            result["invoice_read_error"] = "The saved PDF verification did not match. Retry PDF / email or contact the organizer."
+            try:
+                result["_invoice_pdf_bytes"] = _verify_pdf_bytes(pdf, expected)
+                result.pop("invoice_read_error", None)
+            except (ValueError, TypeError, OSError, PyPdfError):
+                result["invoice_read_error"] = "The PDF could not be verified. Retry PDF / email or contact the organizer."
     return result
 
 def process_saved_documents(booking: dict, edit_token: str = "", force_check: bool = False,
@@ -150,18 +182,32 @@ def process_saved_documents(booking: dict, edit_token: str = "", force_check: bo
     """Store the protected PDF after save; normal email delivery is queued."""
     pdf, payload = _pdf_payload(booking)
     body = {"booking_id": booking["booking_id"], "invoice": payload,
-            "force_check": bool(force_check), "defer_email": bool(defer_email)}
+            "force_check": bool(force_check), "defer_email": bool(defer_email),
+            "return_pdf": bool(force_check)}
     if edit_token:
         body["edit_token"] = edit_token
-    result = _with_local_pdf(_post("process_documents", body, attempts=1), pdf)
+    result = _with_local_pdf(_decode_pdf(_post("process_documents", body, attempts=1)), pdf)
+    # A retry can encounter an already stored protected PDF whose random owner
+    # password makes its hash different from a freshly generated copy. Fetch
+    # the exact Drive bytes only in that mismatch case instead of reporting a
+    # false corruption warning or attaching a different file.
+    if pdf and result.get("invoice_created") and not result.get("_invoice_pdf_bytes"):
+        exact_body = {**body, "force_check": True, "return_pdf": True}
+        exact = _decode_pdf(_post("process_documents", exact_body, attempts=1))
+        if exact.get("saved"):
+            result = {**result, **exact}
+        else:
+            result["invoice_read_error"] = "The saved PDF could not be retrieved. Retry PDF / email or contact the organizer."
     return SaveResult(ok=bool(result.get("ok")), saved=bool(result.get("saved")),
                       message=str(result.get("error") or result.get("message") or ""), data=result)
 
 def retry_request_documents(booking: dict, edit_token: str) -> SaveResult:
     # Existing-request manager keeps its edit-token authorization path.
     pdf, payload = _pdf_payload(booking)
-    result = _with_local_pdf(_post("retry_documents", {"booking_id": booking["booking_id"],
-                           "edit_token": edit_token, "invoice": payload}), pdf)
+    result = _with_local_pdf(_decode_pdf(_post("retry_documents", {
+        "booking_id": booking["booking_id"], "edit_token": edit_token,
+        "invoice": payload, "return_pdf": True,
+    })), pdf)
     return SaveResult(ok=bool(result.get("ok")), saved=bool(result.get("saved")),
                       message=str(result.get("error") or result.get("message") or ""), data=result)
 

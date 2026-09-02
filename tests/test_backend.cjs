@@ -55,7 +55,8 @@ vm.createContext(ctx);vm.runInContext(fs.readFileSync(path.join(__dirname,'../go
 const call=(name,...args)=>ctx[name](...args);
 const all=name=>call('rows_',call('ensureSheet_',name,name==='Room Inventory'?['Hotel','Room Type','Date','Capacity']:[]));
 const clone=b=>JSON.parse(JSON.stringify(b));
-const invoice=b=>{const normalized=call('normalizeBooking_',b),bytes=Buffer.from('%PDF-1.4 offline-test');return{
+const invoice=b=>{const normalized=call('normalizeBooking_',b),bytes=Buffer.concat([
+  Buffer.from('%PDF-1.7\n'),Buffer.alloc(1200,32),Buffer.from('\n%%EOF\n')]);return{
   base64:bytes.toString('base64'),sha256:crypto.createHash('sha256').update(bytes).digest('hex'),
   filename:normalized.invoice_no+'.pdf',mime_type:'application/pdf',verification_code:normalized.invoice_verification_code};};
 function changed(b,id){const copy=clone(b);copy.booking_id='ITKF-20260830-'+id.padStart(12,'0');return copy;}
@@ -70,32 +71,36 @@ assert.equal(all('Bookings').length,1);assert.equal(all('Invoices').length,1);as
 assert.equal(all('Bookings')[0]['Federation Country'],'Egypt');
 assert.equal(all('Bookings')[0]['Federation Country Code'],'EG');
 assert.equal(JSON.parse(all('Bookings')[0]['Booking JSON']).federation_country,'Egypt');
+const confirmed=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,
+  token:'test-token',action:'booking_status',booking_id:fixture.booking_id,
+  expected_revision:1,invoice_no:normalized.invoice_no,email:fixture.email})}});
+assert(confirmed.saved,'lost create response can confirm the same durable request');
 const otherCountry=clone(fixture);otherCountry.federation_country='Germany';otherCountry.federation_country_code='DE';
 failure('ID_CONFLICT',()=>call('createBooking_',otherCountry,{}));
 const noCountry=changed(fixture,'10');delete noCountry.federation_country;delete noCountry.federation_country_code;
 failure('VALIDATION_ERROR',()=>call('createBooking_',noCountry,{}));
 result=call('createBooking_',fixture,invoice(fixture));assert.equal(all('Bookings').length,1);assert.equal(emailCount,1);assert.equal(files.size,1);
 const ac=call('accommodation_',fixture);
-assert.equal(call('availability_',ac,all('Bookings'))[0].remaining,3);
+assert.equal(call('availability_',ac,all('Bookings'))[0].remaining,49);
 const next=clone(fixture);next.check_in='2026-10-26';next.check_out='2026-10-27';
-assert.equal(call('availability_',call('accommodation_',next),all('Bookings'))[0].remaining,4,'checkout night released');
+assert.equal(call('availability_',call('accommodation_',next),all('Bookings'))[0].remaining,50,'checkout night released');
 // An already accepted request retains its price if rates change later.
 vm.runInContext('HOTEL_RATES_EUR["Tiba Rose El Golf"].Breakfast.Double=999',ctx);
 result=call('createBooking_',fixture,{});assert(result.saved);assert.equal(all('Bookings')[0]['Grand Total EUR'],fixture.grand_total_eur);
 vm.runInContext('HOTEL_RATES_EUR["Tiba Rose El Golf"].Breakfast.Double=50',ctx);
 // A legacy row without new JSON columns still reserves one room.
 const legacy={'Booking ID':'LEGACY-TEST',Hotel:fixture.hotel,'Room Type':'Double','Check-in':'2026-10-24','Check-out':'2026-10-26',Status:'Confirmed'};
-assert.equal(call('availability_',ac,[legacy])[0].remaining,3);
-legacy.Status='Cancelled';assert.equal(call('availability_',ac,[legacy])[0].remaining,4);
+assert.equal(call('availability_',ac,[legacy])[0].remaining,49);
+legacy.Status='Cancelled';assert.equal(call('availability_',ac,[legacy])[0].remaining,50);
 legacy.Status='Confirmed';legacy['Check-in']='bad-date';failure('INVENTORY_REVIEW',()=>call('availability_',ac,[legacy]));
 const conflict=clone(fixture);conflict.email='different@example.com';failure('ID_CONFLICT',()=>call('createBooking_',conflict,{}));
 const invctx=call('ensureSheet_','Room Inventory',['Hotel','Room Type','Date','Capacity']);
 let stock=all('Room Inventory').find(r=>r.Hotel===fixture.hotel&&r['Room Type']==='Double');
 call('writeRow_',invctx,stock._row,{Capacity:1},stock);call('setupSheetsNow');
-stock=all('Room Inventory').find(r=>r.Hotel===fixture.hotel&&r['Room Type']==='Double');assert.equal(stock.Capacity,4,'setup synchronizes official capacity');
+stock=all('Room Inventory').find(r=>r.Hotel===fixture.hotel&&r['Room Type']==='Double');assert.equal(stock.Capacity,50,'setup synchronizes official capacity');
 call('writeRow_',invctx,stock._row,{Capacity:1},stock);
 failure('SOLD_OUT',()=>call('createBooking_',changed(fixture,'2'),{}));assert.equal(all('Bookings').length,1);
-call('writeRow_',invctx,stock._row,{Capacity:4},stock);
+call('writeRow_',invctx,stock._row,{Capacity:50},stock);
 busy=true;failure('BUSY',()=>call('createBooking_',changed(fixture,'3'),{}));busy=false;assert.equal(all('Bookings').length,1);
 const short=changed(fixture,'4');delete short.transport_services[0].vehicles['Toyota Hiace (10 Seats)'];
 failure('VALIDATION_ERROR',()=>call('createBooking_',short,{}));
@@ -116,7 +121,7 @@ result=call('createBooking_',pdfPending,invoice(pdfPending));assert(result.invoi
 const badDate=changed(fixture,'9');badDate.check_in='2026-02-30';failure('VALIDATION_ERROR',()=>call('createBooking_',badDate,{}));
 const override={Hotel:fixture.hotel,'Room Type':'Double',Date:'2026-10-25',Capacity:0};call('writeRow_',invctx,0,override);
 assert.equal(call('availability_',ac,all('Bookings'))[0].remaining,0,'per-date override');
-assert.equal(call('availability_',call('accommodation_',next),all('Bookings'))[0].remaining,4);
+assert.equal(call('availability_',call('accommodation_',next),all('Bookings'))[0].remaining,50);
 for (const end of ['2026-10-24','2026-10-23']) {
   assert.throws(()=>call('nights_','2026-10-24',end),e=>e.message==='The check-out date must be after the check-in date.');
 }
@@ -198,7 +203,7 @@ assert.equal(result.revision,2);assert(result.invoice_no.endsWith('-R2'));
 assert.equal(all('Bookings').length,requestCount,'amendment replaces the same row');
 assert.equal(all('Invoices').length,invoiceCount+1,'prior invoice retained');
 assert.equal(all('Request History').filter(r=>r['Booking ID']===edited.booking_id).length,1);
-assert.equal(call('availability_',call('accommodation_',edited),all('Bookings'))[0].remaining,2,'only revised room count is held');
+assert.equal(call('availability_',call('accommodation_',edited),all('Bookings'))[0].remaining,48,'only revised room count is held');
 const mailAfterEdit=emails.length;
 result=call('amendBooking_',edited,invoice(edited),auth);
 assert.equal(result.revision,2);assert.equal(all('Bookings').length,requestCount);assert.equal(emails.length,mailAfterEdit,'lost edit response is idempotent');
@@ -206,19 +211,31 @@ failure('EDIT_CONFLICT',()=>call('amendBooking_',edited,{}, {...auth,edit_operat
 failure('NO_CHANGES',()=>call('amendBooking_',edited,{}, {...auth,expected_revision:2,edit_operation_id:'b'.repeat(32)}));
 const reordered=clone(edited);reordered.transport_services.reverse();
 failure('NO_CHANGES',()=>call('amendBooking_',reordered,{}, {...auth,expected_revision:2,edit_operation_id:'b'.repeat(32)}));
-const oversized=clone(edited);oversized.rooms[0].quantity=11;oversized.revision=3;
-oversized.grand_total_eur+=9*oversized.rooms[0].unit_rate_eur*oversized.nights;
+const oversized=clone(edited);oversized.rooms[0].quantity=51;oversized.revision=3;
+oversized.grand_total_eur+=49*oversized.rooms[0].unit_rate_eur*oversized.nights;
 failure('SOLD_OUT',()=>call('amendBooking_',oversized,{}, {...auth,expected_revision:2,edit_operation_id:'c'.repeat(32)}));
 assert.equal(call('loadRequest_',edited.booking_id,token).revision,2,'failed update leaves previous request intact');
 const editableAvailability=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',
   action:'check_availability',booking:edited,edit_token:token})}});
-assert.equal(editableAvailability.availability[0].remaining,4,'preview excludes own reservation only after authorization');
+assert.equal(editableAvailability.availability[0].remaining,50,'preview excludes own reservation only after authorization');
 // Missing Drive copy can be repaired after reopening, without another revision.
 let latest=call('loadRequest_',edited.booking_id,token);
 const missingFile=all('Bookings').find(r=>r['Booking ID']===edited.booking_id)['Invoice File ID'];files.delete(missingFile);
 latest=call('loadRequest_',edited.booking_id,token);assert(latest.invoice_read_error);
-const repaired=call('processDocuments_',latest.booking,invoice(latest.booking));
+const repaired=call('processDocuments_',latest.booking,invoice(latest.booking),true,false,true);
 assert(repaired.invoice_created);assert(repaired.customer_email_sent);assert.equal(repaired.revision,2);
+// A readable but corrupted Drive file is replaced and the corrected PDF is
+// re-sent instead of remaining in an endless pending state.
+const corruptId=all('Bookings').find(r=>r['Booking ID']===edited.booking_id)['Invoice File ID'];
+const corruptName=files.get(corruptId).name;
+files.set(corruptId,{name:corruptName,getId:()=>corruptId,getUrl:()=>`private:${corruptId}`,
+  getBlob:()=>blob(Buffer.from('%PDF-1.7 readable but missing eof'),'application/pdf',corruptName),
+  setTrashed:()=>files.delete(corruptId)});
+const mailsBeforeCorruptRepair=emailCount;
+const corruptRepaired=call('processDocuments_',latest.booking,invoice(latest.booking),true,false,true);
+assert(corruptRepaired.invoice_created);assert(corruptRepaired.customer_email_sent);
+assert.notEqual(corruptRepaired.invoice_sha256,'');assert.equal(emailCount,mailsBeforeCorruptRepair+1);
+assert(corruptRepaired.invoice_base64,'recovery returns the authoritative repaired PDF');
 failure('EDIT_CONFLICT',()=>call('updateDocument_',latest.booking,'old-lease',{'Customer Email Sent':false}));
 // Quota failures preserve the revised request and can be retried after reopening.
 const third=clone(edited);third.rooms[0].quantity=3;third.revision=3;third.grand_total_eur+=100;
@@ -251,7 +268,7 @@ failure('EDIT_AUTH',()=>call('loadRequest_',edited.booking_id,token));
 call('updateBooking_',person.booking_id,{Status:'Cancelled'});
 assert(!call('loadRequest_',person.booking_id,personToken).editable);
 failure('EDIT_CLOSED',()=>call('amendBooking_',personal,{}, {edit_token:personToken,expected_revision:2,edit_operation_id:'f'.repeat(32)}));
-// v5.5 fast completion: Web App save returns before MailApp; protected PDF is
+// v5.7 fast completion: Web App save returns before MailApp; protected PDF is
 // stored first and the installed trigger delivers the pending email later.
 quota=1000;
 const queued=changed(fixture,'13');queued.check_in='2026-12-10';queued.check_out='2026-12-12';

@@ -99,7 +99,7 @@ class RequestTests(unittest.TestCase):
         self.assertNotIn("Hilton Cairo Heliopolis", HOTELS)
         self.assertNotIn("Sonesta Hotel Tower & Casino Cairo", HOTELS)
         self.assertEqual(HOTELS["Royal Marshal Hotel"]["rates"]["Breakfast"], {"Single":47.5,"Double":65.0})
-        self.assertEqual(ROOM_INVENTORY["Tiba Rose El Golf"], {"Single":4,"Double":4,"Triple":4})
+        self.assertEqual(ROOM_INVENTORY["Tiba Rose El Golf"], {"Single":30,"Double":50,"Triple":100,"Quadruple":20})
         self.assertEqual(ROOM_INVENTORY["Royal Marshal Hotel"], {"Single":10,"Double":30})
     def test_no_photo_required_and_individual_single_room(self):
         b=example("Individual")
@@ -161,6 +161,29 @@ class RequestTests(unittest.TestCase):
         self.assertIn("Federation Country",text)
         self.assertIn("Egypt",text)
         self.assertIn(SYSTEM_TITLE,text)
+
+    def test_large_pdf_uses_readable_extra_pages(self):
+        from pypdf import PdfReader
+        b=example(); b.update(calculate_booking_totals(b))
+        b.update(invoice_no="INV-20260902-LARGE",invoice_verification_code="TEST-TEST-TEST-TEST")
+        b["transport_services"]=[]
+        for index in range(60):
+            b["transport_services"].append({
+                "date":f"2026-{10+index//28:02d}-{1+index%28:02d}",
+                "service":f"Service {index+1:02d}","direction":f"Route {index+1:02d}",
+                "start_time":f"{index%24:02d}:00","end_time":f"{(index+1)%24:02d}:00",
+                "ends_next_day":index%24==23,"persons":60,"seats":60,
+                "vehicle_lines":[{"vehicle":"Bus (50 Seats)","quantity":1,
+                                  "unit_price_eur":190,"total_eur":190}],
+            })
+        b["transport_total_eur"]=11400
+        b["grand_total_eur"]=b["room_total_eur"]+b["transport_total_eur"]
+        reader=PdfReader(io.BytesIO(generate_pdf(b)),strict=True)
+        self.assertTrue(reader.is_encrypted); reader.decrypt("")
+        self.assertGreater(len(reader.pages),1)
+        text="\n".join(page.extract_text() or "" for page in reader.pages)
+        self.assertIn("Service 60",text)
+        self.assertIn("EUR 11,500.00",text)
     def test_node_backend(self):
         b=example(); b["transport_services"]=[service()]; b.update(calculate_booking_totals(b))
         run=subprocess.run(["node",str(ROOT/"tests/test_backend.cjs")],input=json.dumps(b),text=True,capture_output=True)

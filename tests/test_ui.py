@@ -69,7 +69,7 @@ class WizardTests(unittest.TestCase):
         with patch('config.APP_SCHEMA_VERSION','2026-08-30-v2'):
             self.at=AppTest.from_file(str(ROOT/'app.py'),default_timeout=10).run()
             self.clean()
-            self.assertTrue(any('matching v5 config.py' in item.value for item in self.at.error))
+            self.assertTrue(any('matching v5.7 config.py' in item.value for item in self.at.error))
             self.assertFalse(list(self.at.button))
 
     def test_old_helpers_module_in_memory_does_not_break_app(self):

@@ -1,12 +1,23 @@
 import base64
 import hashlib
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 import requests
+from pypdf import PdfWriter
 import sheets
 from config import APP_SCHEMA_VERSION
 from test_request import example
 from helpers import calculate_booking_totals
+
+
+def valid_pdf(label="test"):
+    output = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    writer.add_metadata({"/Title": label})
+    writer.write(output)
+    return output.getvalue()
 
 class ClientTests(unittest.TestCase):
     def test_post_sends_schema_without_get_preflight(self):
@@ -37,7 +48,7 @@ class ClientTests(unittest.TestCase):
             self.assertIn('may already be saved',result['error'])
 
     def test_load_request_uses_exact_stored_pdf(self):
-        stored=b'%PDF-1.4 stored document'
+        stored=valid_pdf()
         response={'ok':True,'saved':True,'invoice_created':True,'invoice_base64':base64.b64encode(stored).decode(),'invoice_sha256':hashlib.sha256(stored).hexdigest()}
         with patch.object(sheets,'_post',return_value=response):
             self.assertEqual(sheets.load_request('ITKF-20260830-ABCDEF123456','grant')['_invoice_pdf_bytes'],stored)
@@ -67,9 +78,34 @@ class ClientTests(unittest.TestCase):
 
     def test_normal_document_processing_defers_email(self):
         b=example(); b.update(calculate_booking_totals(b)); b.update(invoice_no='INV-SAVED',invoice_verification_code='saved-code')
-        with patch.object(sheets,'generate_pdf',return_value=b'%PDF-saved'),patch.object(sheets,'_post',return_value={'ok':True,'saved':True,'invoice_created':True}) as post:
+        pdf=valid_pdf()
+        with patch.object(sheets,'generate_pdf',return_value=pdf),patch.object(sheets,'_post',return_value={'ok':True,'saved':True,'invoice_created':True,'invoice_sha256':hashlib.sha256(pdf).hexdigest()}) as post:
             self.assertTrue(sheets.process_saved_documents(b).saved)
             self.assertTrue(post.call_args.args[1]['defer_email'])
+
+    def test_existing_randomly_protected_pdf_returns_exact_drive_copy(self):
+        b=example(); b.update(calculate_booking_totals(b)); b.update(invoice_no='INV-SAVED',invoice_verification_code='saved-code')
+        local=valid_pdf('local regenerated copy')
+        stored=valid_pdf('authoritative Drive copy')
+        first={'ok':True,'saved':True,'invoice_created':True,'invoice_sha256':hashlib.sha256(stored).hexdigest()}
+        second={**first,'invoice_base64':base64.b64encode(stored).decode()}
+        with patch.object(sheets,'generate_pdf',return_value=local), patch.object(sheets,'_post',side_effect=[first,second]) as post:
+            result=sheets.process_saved_documents(b)
+            self.assertTrue(result.saved)
+            self.assertEqual(result.data['_invoice_pdf_bytes'],stored)
+            self.assertEqual(post.call_count,2)
+            self.assertTrue(post.call_args_list[1].args[1]['return_pdf'])
+
+    def test_lost_create_response_checks_same_request_before_retry(self):
+        b=example(); b.update(calculate_booking_totals(b))
+        replies=[
+            {'ok':False,'saved':False,'error_code':'CONNECTION'},
+            {'ok':True,'saved':True,'booking_id':b['booking_id']},
+        ]
+        with patch.object(sheets,'_secret',return_value='test'), patch.object(sheets,'_post',side_effect=replies) as post:
+            result=sheets.save_to_google_sheets(b,max_attempts=2)
+            self.assertTrue(result.saved)
+            self.assertEqual([call.args[0] for call in post.call_args_list],['create_booking','booking_status'])
 
     def test_document_recovery_uses_saved_snapshot(self):
         b=example();b.update(calculate_booking_totals(b));b.update(invoice_no='INV-SAVED-R2',invoice_verification_code='saved-code')

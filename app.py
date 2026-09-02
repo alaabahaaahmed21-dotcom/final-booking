@@ -28,8 +28,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-09-02-v5.6":
-    st.error("This app needs the matching v5.6 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-09-02-v5.7":
+    st.error("This app needs the matching v5.7 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
@@ -37,7 +37,7 @@ try:
                         request_edit_code, verify_edit_code, load_request, retry_request_documents,
                         process_saved_documents)
 except ImportError:
-    st.error("Upload the matching v5.6 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5.7 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -1035,14 +1035,25 @@ def attempt_save(record):
 def process_completion_documents(saved):
     """Process PDF/Drive/email after the durable reservation is already shown as saved."""
     invoice_no = str(saved.get("invoice_no", ""))
-    if not invoice_no or (saved.get("invoice_created") and saved.get("customer_email_sent")):
+    force_check = bool(st.session_state.get("document_force_check"))
+    if not invoice_no or (
+        saved.get("invoice_created")
+        and saved.get("customer_email_sent")
+        and not saved.get("invoice_read_error")
+        and not force_check
+    ):
         return saved
     if st.session_state.get("documents_attempted_for_invoice") == invoice_no:
         return saved
     st.session_state.documents_attempted_for_invoice = invoice_no
     edit_token = (st.session_state.edit_context or {}).get("edit_token", "")
     with st.status("Preparing your one-page PDF and email...", expanded=False) as status:
-        result = process_saved_documents(saved, edit_token=edit_token, force_check=bool(st.session_state.get("document_force_check")))
+        result = process_saved_documents(
+            saved,
+            edit_token=edit_token,
+            force_check=force_check,
+            defer_email=not force_check,
+        )
         if result.saved:
             updated = {**saved, **result.data.get("booking", {}), **result.data}
             st.session_state.last_booking = updated

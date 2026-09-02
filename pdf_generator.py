@@ -17,18 +17,18 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.lib.pdfencrypt import StandardEncryption
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     Image as RLImage,
-    KeepInFrame,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
 )
+from pypdf import PdfReader, PdfWriter
+from pypdf.constants import UserAccessPermissions
 
 from config import BASE_DIR, EVENT_TITLE, LOGO_PATHS, SYSTEM_TITLE
 
@@ -188,16 +188,39 @@ def _transport_groups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [grouped[key] for key in order]
 
 
+def _protect_pdf(pdf_bytes: bytes) -> bytes:
+    """Apply modern AES protection while allowing normal printing."""
+
+    reader = PdfReader(io.BytesIO(pdf_bytes), strict=True)
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+    if reader.metadata:
+        writer.add_metadata({
+            str(key): str(value)
+            for key, value in reader.metadata.items()
+            if value is not None
+        })
+    writer.encrypt(
+        user_password="",
+        owner_password=secrets.token_urlsafe(32),
+        permissions_flag=(
+            UserAccessPermissions.PRINT
+            | UserAccessPermissions.PRINT_TO_REPRESENTATION
+        ),
+        algorithm="AES-128",
+    )
+    protected = io.BytesIO()
+    writer.write(protected)
+    return protected.getvalue()
+
+
 def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
     """Numbered EUR-only request summary, with modification restrictions."""
     buffer = io.BytesIO()
-    encryption = StandardEncryption(
-        userPassword="", ownerPassword=secrets.token_urlsafe(32),
-        canPrint=1, canModify=0, canCopy=0, canAnnotate=0, strength=128,
-    ) if protect else None
     document = SimpleDocTemplate(
         buffer, pagesize=A4, leftMargin=13*mm, rightMargin=13*mm,
-        topMargin=9*mm, bottomMargin=14*mm, encrypt=encryption,
+        topMargin=9*mm, bottomMargin=14*mm,
         title="Booking Request " + str(booking.get("invoice_no", "")),
     )
     styles = getSampleStyleSheet()
@@ -293,10 +316,8 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
         canvas.drawString(16*mm,9*mm,str(booking.get("invoice_no","")))
         canvas.drawRightString(194*mm,9*mm,f"Page {doc.page}")
         canvas.restoreState()
-    # One-page invoice: keep the complete summary in one A4 frame and shrink
-    # proportionally only when a large federation/transport request needs it.
-    available_width = A4[0] - document.leftMargin - document.rightMargin
-    available_height = A4[1] - document.topMargin - document.bottomMargin
-    one_page = KeepInFrame(available_width, available_height, story, mode="shrink", mergeSpace=True)
-    document.build([one_page], onFirstPage=footer, onLaterPages=footer)
-    return buffer.getvalue()
+    # Normal summaries still fit on one page. Large requests flow naturally to
+    # extra pages instead of shrinking the text below a readable size.
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    raw_pdf = buffer.getvalue()
+    return _protect_pdf(raw_pdf) if protect else raw_pdf
