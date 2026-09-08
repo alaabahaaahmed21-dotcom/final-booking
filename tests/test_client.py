@@ -20,6 +20,19 @@ def valid_pdf(label="test"):
     return output.getvalue()
 
 class ClientTests(unittest.TestCase):
+    def test_repricing_preview_and_apply_use_expected_price_guard(self):
+        candidate={"booking_id":"ITKF-20260830-ABCDEF123456","revision":2,
+                   "room_total_old":100,"room_total_new":200}
+        with patch.object(sheets,'_post',return_value={'ok':True}) as post:
+            sheets.preview_repricing(after_row=12,limit=25)
+            self.assertEqual(post.call_args.args[:2],('preview_repricing',{'after_row':12,'limit':25}))
+            sheets.reprice_booking(candidate)
+            action,body=post.call_args.args
+            self.assertEqual(action,'reprice_booking')
+            self.assertEqual(body['expected_revision'],2)
+            self.assertEqual(body['expected_room_total_old'],100.0)
+            self.assertEqual(body['expected_room_total_new'],200.0)
+
     def test_post_sends_schema_without_get_preflight(self):
         reply=MagicMock(); reply.status_code=200; reply.json.return_value={'ok':True,'saved':True}
         with patch.object(sheets,'backend_is_configured',return_value=True), patch.object(sheets,'_url',return_value='https://example.test/exec'), patch.object(sheets,'_secret',return_value='token'), patch.object(sheets.requests,'get') as get, patch.object(sheets.requests,'post',return_value=reply) as post:

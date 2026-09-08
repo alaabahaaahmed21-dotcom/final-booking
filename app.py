@@ -28,8 +28,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-09-02-v5.7":
-    st.error("This app needs the matching v5.7 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-09-08-v5.9":
+    st.error("This app needs the matching v5.9 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
@@ -37,7 +37,7 @@ try:
                         request_edit_code, verify_edit_code, load_request, retry_request_documents,
                         process_saved_documents)
 except ImportError:
-    st.error("Upload the matching v5.7 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5.9 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -945,7 +945,8 @@ def render_hotel_room_selection():
             )
             st.info(
                 f"Available now: {available.get(st.session_state.room_type, 0)} room(s) · "
-                f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]}"
+                f"Number of guests: {ROOM_OCCUPANCY[st.session_state.room_type]} · "
+                f"Rate: {format_currency(rates[st.session_state.room_type])} / person / night"
             )
         if sold_out:
             st.caption("Sold out for these dates: " + ", ".join(sold_out) + ".")
@@ -956,7 +957,7 @@ def render_hotel_room_selection():
             st.session_state[key] = min(int(st.session_state.get(key, 0)), remaining)
             input_field(
                 "number_input",
-                f"{room} — {format_currency(rate)} / room / night — {remaining} available",
+                f"{room} — {format_currency(rate)} / person / night — {remaining} available",
                 min_value=0, max_value=remaining, step=1, key=key, disabled=remaining == 0
             )
         st.caption(
@@ -996,7 +997,10 @@ def show_summary(raw):
     try:
         totals = calculate_booking_totals(raw)
         for room in totals["rooms"]:
-            st.write(f"{room['room_type']} × {room['quantity']} rooms · {format_currency(room['total_eur'])}")
+            st.write(
+                f"{room['room_type']} × {room['quantity']} rooms × "
+                f"{room['persons_per_room']} persons · {format_currency(room['total_eur'])}"
+            )
         st.write(f"Nights: {totals['nights']} · Guests: {totals['guests']}")
         if totals["transport_services"]:
             st.subheader("Transportation")
@@ -1196,7 +1200,11 @@ def render_request_manager():
         st.write(f"{booking['hotel']} · {booking['check_in']} to {booking['check_out']}")
         with st.expander("View saved rooms and transportation"):
             for room in booking.get("rooms", []):
-                st.write(f"{room['room_type']} × {room['quantity']} room(s) · {format_currency(room['total_eur'])}")
+                persons = room.get("persons_per_room", ROOM_OCCUPANCY.get(room.get("room_type"), 0))
+                st.write(
+                    f"{room['room_type']} × {room['quantity']} room(s) × {persons} persons · "
+                    f"{format_currency(room['total_eur'])}"
+                )
             for service in booking.get("transport_services", []):
                 suffix = " (next day)" if service.get("ends_next_day") else ""
                 st.write(f"{service['date']} · {service['service']} · {service.get('direction', '')} · {service['start_time']}–{service['end_time']}{suffix}")

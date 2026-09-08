@@ -30,13 +30,14 @@ class Sheet {
   setFrozenRows(){} getRange(...args){return new Range(this,...args);}
 }
 const sheets={},files=new Map(),emails=[],cache=new Map(),triggers=[];let locked=false,busy=false,quota=100,emailCount=0,seq=0;
+const scriptProperties={SPREADSHEET_ID:'test-sheet',BOOKING_API_TOKEN:'test-token',INVOICE_FOLDER_ID:'test-folder',REPRICING_ENABLED:'true'};
 const blob=(bytes,mime,name)=>({getBytes:()=>Array.from(bytes),setName:()=>blob(bytes,mime,name)});
 const ss={getSheetByName:n=>sheets[n],insertSheet:n=>(sheets[n]=new Sheet()),getSpreadsheetTimeZone:()=> 'Etc/UTC'};
 const folder={getFilesByName:name=>{const found=[...files.values()].filter(f=>f.name===name);return{hasNext:()=>!!found.length,next:()=>found.shift()};},createFile:b=>{
   const id='file'+(++seq), name=b.name;const f={name,getId:()=>id,getUrl:()=>`private:${id}`,getBlob:()=>b,setTrashed:()=>{files.delete(id);}};files.set(id,f);return f;
 }};
 const ctx={console,Date,Math,JSON,Object,Array,Number,String,Boolean,Error,Infinity,isFinite,
-  PropertiesService:{getScriptProperties:()=>({getProperty:n=>({SPREADSHEET_ID:'test-sheet',BOOKING_API_TOKEN:'test-token',INVOICE_FOLDER_ID:'test-folder'}[n]??null)})},
+  PropertiesService:{getScriptProperties:()=>({getProperty:n=>scriptProperties[n]??null})},
   LockService:{getScriptLock:()=>({tryLock:()=>{if(busy||locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
   CacheService:{getScriptCache:()=>({get:key=>cache.get(key)||null,put:(key,value)=>cache.set(key,value),remove:key=>cache.delete(key)})},
   ScriptApp:{getProjectTriggers:()=>triggers,newTrigger:name=>({timeBased(){return this;},everyMinutes(){return this;},create(){const t={getHandlerFunction:()=>name};triggers.push(t);return t;}})},
@@ -189,7 +190,7 @@ failure('EDIT_AUTH',()=>call('loadRequest_',noPhone.booking_id,'bad-token'));
 failure('EDIT_CODE',()=>call('verifyEditCode_',noPhone.booking_id,noPhone.email,emails.at(-1).body.match(/code is: (\d{8})/)[1]));
 const requestCount=all('Bookings').length, invoiceCount=all('Invoices').length;
 let edited=clone(loaded.booking);
-edited.rooms[0].quantity=2;edited.grand_total_eur+=edited.rooms[0].unit_rate_eur*edited.nights;
+edited.rooms[0].quantity=2;edited.grand_total_eur+=edited.rooms[0].unit_rate_eur*edited.rooms[0].persons_per_room*edited.nights;
 edited.schema_version=fixture.schema_version;edited.revision=2;edited.updated_at=new Date().toISOString();
 const auth={edit_token:token,expected_revision:1,edit_operation_id:'a'.repeat(32)};
 failure('EDIT_AUTH',()=>call('amendBooking_',edited,{}, {...auth,edit_token:'bad-token'}));
@@ -212,7 +213,7 @@ failure('NO_CHANGES',()=>call('amendBooking_',edited,{}, {...auth,expected_revis
 const reordered=clone(edited);reordered.transport_services.reverse();
 failure('NO_CHANGES',()=>call('amendBooking_',reordered,{}, {...auth,expected_revision:2,edit_operation_id:'b'.repeat(32)}));
 const oversized=clone(edited);oversized.rooms[0].quantity=51;oversized.revision=3;
-oversized.grand_total_eur+=49*oversized.rooms[0].unit_rate_eur*oversized.nights;
+oversized.grand_total_eur+=49*oversized.rooms[0].unit_rate_eur*oversized.rooms[0].persons_per_room*oversized.nights;
 failure('SOLD_OUT',()=>call('amendBooking_',oversized,{}, {...auth,expected_revision:2,edit_operation_id:'c'.repeat(32)}));
 assert.equal(call('loadRequest_',edited.booking_id,token).revision,2,'failed update leaves previous request intact');
 const editableAvailability=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',
@@ -238,7 +239,8 @@ assert.notEqual(corruptRepaired.invoice_sha256,'');assert.equal(emailCount,mails
 assert(corruptRepaired.invoice_base64,'recovery returns the authoritative repaired PDF');
 failure('EDIT_CONFLICT',()=>call('updateDocument_',latest.booking,'old-lease',{'Customer Email Sent':false}));
 // Quota failures preserve the revised request and can be retried after reopening.
-const third=clone(edited);third.rooms[0].quantity=3;third.revision=3;third.grand_total_eur+=100;
+const third=clone(edited);third.rooms[0].quantity=3;third.revision=3;
+third.grand_total_eur+=third.rooms[0].unit_rate_eur*third.rooms[0].persons_per_room*third.nights;
 quota=0;
 const auth3={...auth,expected_revision:2,edit_operation_id:'d'.repeat(32)};
 const mailFail=call('amendBooking_',third,invoice(third),auth3);
@@ -268,7 +270,7 @@ failure('EDIT_AUTH',()=>call('loadRequest_',edited.booking_id,token));
 call('updateBooking_',person.booking_id,{Status:'Cancelled'});
 assert(!call('loadRequest_',person.booking_id,personToken).editable);
 failure('EDIT_CLOSED',()=>call('amendBooking_',personal,{}, {edit_token:personToken,expected_revision:2,edit_operation_id:'f'.repeat(32)}));
-// v5.7 fast completion: Web App save returns before MailApp; protected PDF is
+// v5.9 fast completion: Web App save returns before MailApp; protected PDF is
 // stored first and the installed trigger delivers the pending email later.
 quota=1000;
 const queued=changed(fixture,'13');queued.check_in='2026-12-10';queued.check_out='2026-12-12';
@@ -279,4 +281,46 @@ assert(queuedDocs.saved);assert(queuedDocs.invoice_created);assert(!queuedDocs.c
 assert(triggers.some(t=>t.getHandlerFunction()==='retryPendingEmails'));
 call('retryPendingEmails');
 assert(all('Bookings').find(r=>r['Booking ID']===queued.booking_id)['Customer Email Sent']);
-console.log('PASS backend: schemas, parity, quotas, retries, passport uniqueness, room holds, OTP, amendments, revisions, recovery, conflict protection');
+
+// One-time historical repricing preserves transportation, archives the prior
+// revision, creates a new revision, and queues the revised protected PDF. It
+// does not expose PII in preview results or touch the customer OTP route.
+const legacyRaw=changed(fixture,'14');legacyRaw.check_in='2026-12-20';legacyRaw.check_out='2026-12-22';
+const legacyBooking=call('normalizeBooking_',legacyRaw);
+const occupancy=legacyBooking.rooms[0].persons_per_room;
+legacyBooking.schema_version='2026-09-02-v5.7';
+legacyBooking.rooms[0].total_eur=legacyBooking.rooms[0].total_eur/occupancy;
+delete legacyBooking.rooms[0].persons_per_room;
+legacyBooking.room_total_eur=legacyBooking.room_total_eur/occupancy;
+legacyBooking.grand_total_eur=legacyBooking.room_total_eur+legacyBooking.transport_total_eur;
+legacyBooking.invoice_verification_code=call('verificationCode_',legacyBooking);
+const legacyColumns=call('bookingColumns_',legacyBooking);
+Object.assign(legacyColumns,{'Booking JSON':JSON.stringify(legacyBooking),'Request Hash':call('requestHash_',legacyRaw),
+  'Schema Version':legacyBooking.schema_version,Status:'Received','Document Status':'Ready','Customer Email Sent':true});
+call('writeRow_',call('ensureSheet_','Bookings',[]),0,legacyColumns);
+scriptProperties.REPRICING_ENABLED='false';failure('REPRICING_DISABLED',()=>call('previewRepricing_',{after_row:1,limit:100}));
+scriptProperties.REPRICING_ENABLED='true';
+let repricePreview=call('previewRepricing_',{after_row:1,limit:100});
+const candidate=repricePreview.items.find(item=>item.booking_id===legacyBooking.booking_id);
+assert(candidate);assert.equal(candidate.room_total_old,100);assert.equal(candidate.room_total_new,200);
+assert(!Object.prototype.hasOwnProperty.call(candidate,'old'));assert(!JSON.stringify(candidate).includes(legacyBooking.email));
+const repriced=call('repriceBooking_',{booking_id:candidate.booking_id,expected_revision:candidate.revision,
+  expected_room_total_old:candidate.room_total_old,expected_room_total_new:candidate.room_total_new});
+assert(repriced.repriced);assert.equal(repriced.revision,2);assert.equal(repriced.booking.room_total_eur,200);
+assert.equal(repriced.booking.transport_total_eur,legacyBooking.transport_total_eur);
+assert.equal(all('Request History').filter(r=>r['Booking ID']===legacyBooking.booking_id).length,1);
+repricePreview=call('previewRepricing_',{after_row:1,limit:100});
+const pendingReprice=repricePreview.items.find(item=>item.booking_id===legacyBooking.booking_id);
+assert(pendingReprice.needs_documents);assert(!pendingReprice.needs_repricing);
+const current=call('repriceBooking_',{booking_id:pendingReprice.booking_id,expected_revision:pendingReprice.revision,
+  expected_room_total_old:pendingReprice.room_total_old,expected_room_total_new:pendingReprice.room_total_new});
+assert(current.already_current);assert.equal(current.revision,2);
+const repricedDocs=call('processDocuments_',current.booking,invoice(current.booking),false,true,false);
+assert(repricedDocs.invoice_created);assert(!repricedDocs.customer_email_sent);
+call('retryPendingEmails');
+const repricedRow=all('Bookings').find(r=>r['Booking ID']===legacyBooking.booking_id);
+assert(repricedRow['Customer Email Sent']);assert.equal(repricedRow['Room Total EUR'],200);
+assert(!call('previewRepricing_',{after_row:1,limit:100}).items.some(item=>item.booking_id===legacyBooking.booking_id));
+const repriceOtpToken=authenticate(repriced.booking);
+assert.equal(call('loadRequest_',repriced.booking.booking_id,repriceOtpToken).revision,2,'OTP editing remains available after repricing');
+console.log('PASS backend: schemas, parity, quotas, retries, passport uniqueness, room holds, OTP, amendments, repricing, revisions, recovery, conflict protection');

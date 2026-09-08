@@ -57,7 +57,7 @@ def _timeout_for(action: str) -> tuple[int, int]:
     """Use short, action-specific timeouts so a slow backend never looks frozen."""
     if action in {"check_availability", "check_all_availability", "booking_status"}:
         return (5, 15)
-    if action in {"create_booking", "amend_booking"}:
+    if action in {"create_booking", "amend_booking", "reprice_booking"}:
         return (5, 18)
     if action in {"process_documents", "retry_documents"}:
         return (5, 30)
@@ -104,6 +104,21 @@ def check_all_availability(check_in: str, check_out: str, booking_id: str = "", 
         },
         attempts=1,
     )
+
+
+def preview_repricing(after_row: int = 1, limit: int = 50) -> dict:
+    """Return a non-mutating page of old bookings needing corrected pricing."""
+    return _post("preview_repricing", {"after_row": int(after_row), "limit": int(limit)}, attempts=1)
+
+
+def reprice_booking(item: dict) -> dict:
+    """Atomically reprice one previewed booking without bypassing customer OTP editing."""
+    return _post("reprice_booking", {
+        "booking_id": item["booking_id"],
+        "expected_revision": int(item["revision"]),
+        "expected_room_total_old": float(item["room_total_old"]),
+        "expected_room_total_new": float(item["room_total_new"]),
+    }, attempts=1)
 
 def request_edit_code(booking_id: str, email: str) -> dict:
     # Never automatically resend an OTP on a lost network response.

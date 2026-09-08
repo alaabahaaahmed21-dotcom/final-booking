@@ -69,7 +69,7 @@ class WizardTests(unittest.TestCase):
         with patch('config.APP_SCHEMA_VERSION','2026-08-30-v2'):
             self.at=AppTest.from_file(str(ROOT/'app.py'),default_timeout=10).run()
             self.clean()
-            self.assertTrue(any('matching v5.7 config.py' in item.value for item in self.at.error))
+            self.assertTrue(any('matching v5.9 config.py' in item.value for item in self.at.error))
             self.assertFalse(list(self.at.button))
 
     def test_old_helpers_module_in_memory_does_not_break_app(self):
@@ -547,7 +547,7 @@ class WizardTests(unittest.TestCase):
         ident=self.at.session_state['transport_ids'][0]
         self.assertEqual(len(self.at.session_state[f'tr_{ident}_selected_dates']),13)
         self.page('Review')
-        self.assertTrue(any('€3,350.00' in m.value for m in self.at.markdown))
+        self.assertTrue(any('€3,450.00' in m.value for m in self.at.markdown))
 
     def test_amendment_submit_retries_same_id_operation_revision(self):
         b=self.managed_fixture()
@@ -594,7 +594,7 @@ class WizardTests(unittest.TestCase):
         self.page('Transportation')
         self.assertEqual(len(self.at.session_state['transport_ids']),2)
         self.page('Review')
-        self.assertTrue(any('€3,600.00' in m.value for m in self.at.markdown))
+        self.assertTrue(any('€3,700.00' in m.value for m in self.at.markdown))
 
     def test_existing_request_requires_code_before_load(self):
         from test_request import example

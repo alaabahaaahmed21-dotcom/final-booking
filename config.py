@@ -1,8 +1,8 @@
 """Central configuration for the 23rd ITKF hotel booking application.
 
 Official hotel rates were transcribed from
-``ITKF_2026_Official_Hotel FINAL.pdf``.  All hotel rates are EUR for one
-night.  The application deliberately treats EUR as the base currency.
+``ITKF_2026_Official_Hotel FINAL.pdf``.  All hotel rates are EUR per person,
+per night.  The application deliberately treats EUR as the base currency.
 """
 
 from __future__ import annotations
@@ -43,9 +43,9 @@ CURRENCY = "EUR"
 # Hotel catalogue - official October 2026 brochure
 # ---------------------------------------------------------------------------
 
-# Each value in ``rates`` is an official EUR nightly rate.  A hotel can offer
-# one or more meal plans.  Room options that are absent from a plan are not
-# selectable in the application.
+# Each value in ``rates`` is an official EUR per-person, per-night rate. A
+# hotel can offer one or more meal plans. Room options that are absent from a
+# plan are not selectable in the application.
 HOTELS = {
     "Tiba Rose El Golf": {
         "stars": 5,
@@ -169,7 +169,7 @@ ROOM_INVENTORY = {
 # Transportation - final approved quotation. EUR per complete vehicle.
 # Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
 # ---------------------------------------------------------------------------
-APP_SCHEMA_VERSION = "2026-09-02-v5.7"
+APP_SCHEMA_VERSION = "2026-09-08-v5.9"
 TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
     "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,

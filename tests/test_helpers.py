@@ -58,11 +58,26 @@ class BookingCalculationsTest(unittest.TestCase):
         self.assertEqual(totals["nights"], 2)
         self.assertEqual(totals["room_count"], 2)
         self.assertEqual(totals["guests"], 8)
-        self.assertEqual(totals["room_total_eur"], 448.0)
-        self.assertEqual(totals["grand_total_eur"], 448.0)
-        self.assertEqual(format_currency(448), "€448.00")
+        self.assertEqual(totals["rooms"][0]["persons_per_room"], 4)
+        self.assertEqual(totals["room_total_eur"], 1792.0)
+        self.assertEqual(totals["grand_total_eur"], 1792.0)
+        self.assertEqual(format_currency(1792), "€1,792.00")
         with self.assertRaises(ValueError):
-            format_currency(448, "USD")
+            format_currency(1792, "USD")
+
+    def test_room_rate_is_multiplied_by_full_occupancy(self):
+        sample = booking()
+        sample.update(
+            hotel="Baron Hotel Cairo",
+            meal_plan="Breakfast",
+            check_in="2026-10-24",
+            check_out="2026-10-25",
+            rooms=[{"room_type": "Triple", "quantity": 1}],
+        )
+        totals = calculate_booking_totals(sample)
+        self.assertEqual(totals["rooms"][0]["unit_rate_eur"], 60.0)
+        self.assertEqual(totals["rooms"][0]["persons_per_room"], 3)
+        self.assertEqual(totals["room_total_eur"], 180.0)
 
     def test_transport_is_full_vehicle_pricing(self):
         item = {

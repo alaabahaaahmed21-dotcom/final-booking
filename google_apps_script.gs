@@ -4,7 +4,7 @@
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-09-02-v5.7";
+const VERSION = "2026-09-08-v5.9";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
@@ -41,7 +41,7 @@ const SERVICES = {
   "Daily 8 Hours": {index:2, hours:8, directions:[]},
   "Daily 12 Hours": {index:3, hours:12, directions:[]}
 };
-// Current hotel catalogue and official EUR rate per room/night.
+// Current hotel catalogue and official EUR rate per person/night.
 const HOTEL_RATES_EUR = {
   "Tiba Rose El Golf": {
     "Breakfast": {"Single": 80, "Double": 50, "Triple": 45, "Quadruple": 112},
@@ -87,6 +87,8 @@ function doPost(e) {
     if (!req.token || !equal_(String(req.token), prop_("BOOKING_API_TOKEN")))
       throw codedError_("UNAUTHORIZED","The booking service credentials do not match.");
     if (req.schema_version !== VERSION) throw codedError_("SCHEMA_VERSION","Update the Apps Script deployment and the application together.");
+    if (req.action === "preview_repricing") return json_(previewRepricing_(req));
+    if (req.action === "reprice_booking") return json_(repriceBooking_(req));
     if (req.action === "check_availability") {
       return json_(locked_(function() {
         const b = accommodation_(req.booking || {});
@@ -195,9 +197,11 @@ function accommodation_(raw) {
       throw codedError_("VALIDATION_ERROR","Invalid or duplicate room type.");
     seen[r.room_type]=true;
     const quantity=int_(r.quantity,"room quantity",5000,false), unit=rates[r.room_type];
-    b.guests+=quantity*ROOM_OCCUPANCY[r.room_type]; b.room_count+=quantity;
-    const total=money_(quantity*unit*b.nights); b.room_total_eur+=total;
-    return {room_type:r.room_type,quantity:quantity,unit_rate_eur:unit,total_eur:total};
+    const personsPerRoom=ROOM_OCCUPANCY[r.room_type];
+    b.guests+=quantity*personsPerRoom; b.room_count+=quantity;
+    const total=money_(quantity*personsPerRoom*unit*b.nights); b.room_total_eur+=total;
+    return {room_type:r.room_type,quantity:quantity,unit_rate_eur:unit,
+      persons_per_room:personsPerRoom,total_eur:total};
   });
   b.room_total_eur=money_(b.room_total_eur);
   return b;
@@ -379,7 +383,7 @@ function createBooking_(raw,invoice) {
     SpreadsheetApp.flush();
     return {booking:b,row:data};
   });
-  // v5.7 fast completion: the current Streamlit client sends no PDF in this
+  // v5.9 fast completion: the current Streamlit client sends no PDF in this
   // first call, so the durable reservation returns immediately. Legacy callers
   // that still supply a PDF keep the previous all-in-one behavior.
   if (invoice && invoice.base64) {
@@ -403,6 +407,127 @@ function bookingColumns_(b) {
 }
 function invoiceNumber_(id,revision) {
   return "INV-"+id.replace(/^ITKF-/,"")+(revision>1?"-R"+revision:"");
+}
+
+/**
+ * One-time accommodation repricing support.
+ *
+ * These functions deliberately have no public UI. They require both the
+ * normal private API token and REPRICING_ENABLED=true in Script Properties.
+ * Customer OTP editing is unchanged and remains the only customer-facing edit
+ * route. Transportation totals are preserved exactly as originally accepted.
+ */
+function requireRepricingEnabled_() {
+  if (String(optionalProp_("REPRICING_ENABLED")).toLowerCase()!=="true")
+    throw codedError_("REPRICING_DISABLED","Set REPRICING_ENABLED to true only while running the controlled repricing tool.");
+}
+function storedTransportTotal_(b) {
+  if (Object.prototype.hasOwnProperty.call(b,"transport_total_eur") && b.transport_total_eur!=="" &&
+      isFinite(Number(b.transport_total_eur))) return money_(Number(b.transport_total_eur));
+  if (!Array.isArray(b.transport_services)) return 0;
+  const total=b.transport_services.reduce(function(sum,item) {
+    if (!item || !isFinite(Number(item.total_eur))) throw Error("Stored transportation total is invalid.");
+    return sum+Number(item.total_eur);
+  },0);
+  return money_(total);
+}
+function repricedSnapshot_(old,row) {
+  const accommodation=accommodation_(old);
+  const transportTotal=storedTransportTotal_(old);
+  const revision=int_(row.Revision||old.revision||1,"revision",100000,false)+1;
+  const b=Object.assign({},old,accommodation,{
+    schema_version:VERSION,
+    transport_services:Array.isArray(old.transport_services)?old.transport_services:[],
+    transport_total_eur:transportTotal,
+    grand_total_eur:money_(accommodation.room_total_eur+transportTotal),
+    revision:revision,
+    updated_at:new Date().toISOString(),
+    status:"Request received"
+  });
+  b.invoice_no=invoiceNumber_(b.booking_id,revision);
+  b.invoice_verification_code=verificationCode_(b);
+  return b;
+}
+function repricingState_(row) {
+  if (!row || !row["Booking ID"] || ["Cancelled","Rejected"].indexOf(String(row.Status))>=0) return null;
+  if (!row["Booking JSON"]) throw Error("Booking JSON is missing; review this row manually.");
+  const old=JSON.parse(row["Booking JSON"]), accommodation=accommodation_(old);
+  const oldRoom=Number(row["Room Total EUR"]!==""?row["Room Total EUR"]:old.room_total_eur);
+  if (!isFinite(oldRoom)) throw Error("Stored accommodation total is invalid.");
+  const oldGrand=Number(row["Grand Total EUR"]!==""?row["Grand Total EUR"]:old.grand_total_eur);
+  if (!isFinite(oldGrand)) throw Error("Stored grand total is invalid.");
+  const transportTotal=storedTransportTotal_(old);
+  const newRoom=money_(accommodation.room_total_eur);
+  const newGrand=money_(newRoom+transportTotal);
+  const needsRepricing=Math.abs(oldRoom-newRoom)>0.001;
+  const repriceMarker=String(row["Last Edit ID"]||"").indexOf("REPRICE-")===0;
+  const needsDocuments=repriceMarker && (!row["Invoice File ID"] || !truthy_(row["Customer Email Sent"]));
+  if (!needsRepricing && !needsDocuments) return null;
+  return {old:old,needs_repricing:needsRepricing,needs_documents:needsDocuments,
+    booking_id:String(row["Booking ID"]),revision:Number(row.Revision||old.revision||1),
+    hotel:String(row.Hotel||old.hotel||""),room_total_old:money_(oldRoom),room_total_new:newRoom,
+    grand_total_old:money_(oldGrand),grand_total_new:newGrand};
+}
+function previewRepricing_(req) {
+  requireRepricingEnabled_();
+  const limit=int_(req.limit===undefined?50:req.limit,"preview limit",100,false);
+  const after=int_(req.after_row===undefined?1:req.after_row,"starting row",100000,true);
+  return locked_(function() {
+    const rows=rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS));
+    const items=[],errors=[]; let last=after;
+    for (const row of rows) {
+      if (row._row<=after) continue;
+      last=row._row;
+      try {
+        const state=repricingState_(row);
+        if (state) {
+          // The preview deliberately returns no customer name, email, phone,
+          // passport or complete booking snapshot.
+          const summary=Object.assign({},state); delete summary.old;
+          items.push(summary);
+        }
+      } catch(e) {
+        errors.push({booking_id:String(row["Booking ID"]||""),error:safeError_(e)});
+      }
+      if (items.length>=limit) break;
+    }
+    const finalRow=rows.length?rows[rows.length-1]._row:after;
+    return {ok:true,items:items,errors:errors,next_after_row:last,has_more:last<finalRow};
+  });
+}
+function repriceBooking_(req) {
+  requireRepricingEnabled_();
+  const id=requestId_(req.booking_id);
+  return locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),row=find_(ctx,"Booking ID",id);
+    if (!row || !row["Booking JSON"] || ["Cancelled","Rejected"].indexOf(String(row.Status))>=0)
+      throw codedError_("EDIT_CLOSED","This request cannot be repriced.");
+    const expected=int_(req.expected_revision,"revision",100000,false);
+    if (Number(row.Revision||1)!==expected)
+      throw codedError_("EDIT_CONFLICT","This request changed after the preview. Run the preview again.");
+    const state=repricingState_(row);
+    if (!state || !state.needs_repricing) {
+      return Object.assign(result_(row,"The corrected price is already stored.",false),
+        {repriced:false,already_current:true});
+    }
+    const expectedOld=Number(req.expected_room_total_old),expectedNew=Number(req.expected_room_total_new);
+    if (!isFinite(expectedOld) || !isFinite(expectedNew) ||
+        Math.abs(expectedOld-state.room_total_old)>0.001 || Math.abs(expectedNew-state.room_total_new)>0.001)
+      throw codedError_("EDIT_CONFLICT","The price changed after the preview. Run the preview again.");
+    const b=repricedSnapshot_(state.old,row);
+    archiveRequest_(row);
+    const changes=Object.assign(bookingColumns_(b),{
+      "Booking JSON":JSON.stringify(b),"Status":row.Status,"Last Edit ID":"REPRICE-"+VERSION,
+      "Document Status":"Pending","Processing Started":"","Document Lease":"",
+      "Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"",
+      "Customer Email Sent":false,"Email Sent At":"","Last Error":""
+    });
+    writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush();
+    const savedRow=Object.assign(row,changes);
+    return Object.assign(result_(savedRow,"The corrected price was saved; the revised PDF/email is pending.",false),
+      {repriced:true,room_total_old:state.room_total_old,room_total_new:b.room_total_eur,
+       grand_total_old:state.grand_total_old,grand_total_new:b.grand_total_eur});
+  });
 }
 function editable_(row) {
   if (["Received","Request received","Updated"].indexOf(String(row.Status))<0)

@@ -111,7 +111,7 @@ class RequestTests(unittest.TestCase):
         out=calculate_booking_totals(b)
         self.assertEqual(out["room_count"], 5)
         self.assertEqual(out["guests"], 8)
-        self.assertEqual(out["grand_total_eur"], 620)
+        self.assertEqual(out["grand_total_eur"], 920)
         self.assertEqual(validate_booking(b), [])
     def test_sixty_passengers(self):
         out=price_transport_service(service())
@@ -155,7 +155,7 @@ class RequestTests(unittest.TestCase):
         data=generate_pdf(b)
         reader=PdfReader(io.BytesIO(data)); self.assertTrue(reader.is_encrypted); reader.decrypt("")
         text="\n".join(p.extract_text() for p in reader.pages)
-        self.assertIn("EUR 350.00", text)
+        self.assertIn("EUR 450.00", text)
         self.assertNotIn("USD", text); self.assertNotIn("EGP",text)
         self.assertIn("TEST FEDERATION",text)
         self.assertIn("Federation Country",text)
@@ -183,7 +183,7 @@ class RequestTests(unittest.TestCase):
         self.assertGreater(len(reader.pages),1)
         text="\n".join(page.extract_text() or "" for page in reader.pages)
         self.assertIn("Service 60",text)
-        self.assertIn("EUR 11,500.00",text)
+        self.assertIn("EUR 11,600.00",text)
     def test_node_backend(self):
         b=example(); b["transport_services"]=[service()]; b.update(calculate_booking_totals(b))
         run=subprocess.run(["node",str(ROOT/"tests/test_backend.cjs")],input=json.dumps(b),text=True,capture_output=True)

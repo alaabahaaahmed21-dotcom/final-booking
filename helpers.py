@@ -151,10 +151,13 @@ def calculate_booking_totals(booking: dict) -> dict:
         seen.add(room)
         qty = positive_int(item.get("quantity"), "Number of rooms")
         unit = rates[room]
-        # Preserve the existing hotel's rate basis; add quantity as a multiplier.
-        line_total = money(unit * qty * nights)
-        room_lines.append({"room_type": room, "quantity": qty, "unit_rate_eur": unit, "total_eur": line_total})
-        guests += ROOM_OCCUPANCY[room] * qty
+        persons_per_room = ROOM_OCCUPANCY[room]
+        # Hotel catalogue rates are per person, per night. A room is charged at
+        # its full occupancy (for example, a EUR 75 Triple costs EUR 225/night).
+        line_total = money(unit * persons_per_room * qty * nights)
+        room_lines.append({"room_type": room, "quantity": qty, "unit_rate_eur": unit,
+                           "persons_per_room": persons_per_room, "total_eur": line_total})
+        guests += persons_per_room * qty
         count += qty
         subtotal += line_total
     if booking.get("registration_type") == "Individual" and count != 1:

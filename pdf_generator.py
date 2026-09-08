@@ -274,7 +274,7 @@ def generate_pdf(booking: dict[str, Any], protect: bool = True) -> bytes:
     story.append(paragraph(booking.get("hotel")))
     story.append(paragraph(str(booking.get("meal_plan",""))+" | "+str(booking.get("check_in",""))+
                            " to "+str(booking.get("check_out",""))+" | "+str(booking.get("nights",""))+" nights"))
-    rows = [["Room Type","Rooms","EUR / Night","Total EUR"]]
+    rows = [["Room Type","Rooms","EUR / Person / Night","Total EUR"]]
     for item in booking.get("rooms", []):
         rows.append([item["room_type"],item["quantity"],_money(item["unit_rate_eur"],"EUR"),_money(item["total_eur"],"EUR")])
     story.extend([Spacer(1,1*mm),table(rows,[69*mm,19*mm,44*mm,46*mm],True),
