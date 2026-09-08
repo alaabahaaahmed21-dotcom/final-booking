@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hmac
 import html
 import importlib.util
 import mimetypes
@@ -35,7 +36,7 @@ if APP_SCHEMA_VERSION != "2026-09-08-v5.9":
 try:
     from sheets import (backend_is_configured, save_to_google_sheets, check_availability, check_all_availability,
                         request_edit_code, verify_edit_code, load_request, retry_request_documents,
-                        process_saved_documents)
+                        process_saved_documents, preview_repricing, reprice_booking)
 except ImportError:
     st.error("Upload the matching v5.9 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
@@ -485,6 +486,174 @@ def section_title(icon: str, title: str, help_text: str = "") -> None:
             f'<div class="itkf-section-help">{html.escape(help_text)}</div>',
             unsafe_allow_html=True,
         )
+
+
+def _repricing_password() -> str:
+    """Read the temporary maintenance password without failing outside Cloud."""
+    try:
+        return str(st.secrets.get("REPRICING_ADMIN_PASSWORD", "")).strip()
+    except Exception:
+        return ""
+
+
+def _load_all_repricing_candidates() -> tuple[list[dict], list[dict]]:
+    """Load every PII-free preview page while requiring forward progress."""
+    items: list[dict] = []
+    errors: list[dict] = []
+    after_row = 1
+    while True:
+        result = preview_repricing(after_row=after_row, limit=100)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or "Repricing preview failed.")
+        items.extend(result.get("items") or [])
+        errors.extend(result.get("errors") or [])
+        if not result.get("has_more"):
+            return items, errors
+        next_row = int(result.get("next_after_row", after_row))
+        if next_row <= after_row:
+            raise RuntimeError("Repricing preview did not advance safely.")
+        after_row = next_row
+
+
+def render_repricing_maintenance() -> None:
+    """Password-protected, temporary operator UI for historical repricing."""
+    render_header()
+    section_title("🔐", "Historical Booking Repricing")
+    st.caption("Temporary organizer-only page. It does not change the customer OTP edit flow.")
+
+    configured_password = _repricing_password()
+    if not configured_password:
+        st.error(
+            "This page is disabled. Add REPRICING_ADMIN_PASSWORD to Streamlit Secrets, "
+            "then reboot the app."
+        )
+        return
+
+    if not st.session_state.get("repricing_authenticated"):
+        with st.form("repricing_login"):
+            entered = st.text_input("Maintenance password", type="password")
+            submitted = st.form_submit_button("Open maintenance page", type="primary")
+        if submitted:
+            if hmac.compare_digest(entered, configured_password):
+                st.session_state.repricing_authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect maintenance password.")
+        return
+
+    if st.button("Lock maintenance page", key="repricing_logout"):
+        st.session_state.pop("repricing_authenticated", None)
+        st.session_state.pop("repricing_preview", None)
+        st.rerun()
+
+    st.warning(
+        "Always preview first. Applying creates a new revision and queues a revised invoice "
+        "to the same registered email. Transportation prices remain unchanged."
+    )
+    report = st.session_state.pop("repricing_last_report", None)
+    if report:
+        st.success(
+            f"Prepared {report['prepared']} revised invoice(s). "
+            f"{report['queued']} email(s) are queued; {report['failed']} failed."
+        )
+        for failure in report["failures"]:
+            st.error(failure)
+    if st.button("Preview bookings only", key="repricing_preview_button", type="primary",
+                 width="stretch"):
+        try:
+            with st.spinner("Reading bookings without changing them..."):
+                items, errors = _load_all_repricing_candidates()
+            st.session_state.repricing_preview = {"items": items, "errors": errors}
+        except Exception as exc:
+            st.session_state.pop("repricing_preview", None)
+            st.error(str(exc))
+
+    preview = st.session_state.get("repricing_preview")
+    if not preview:
+        st.info("Click Preview bookings only. No booking, PDF, or email changes during preview.")
+        return
+
+    items = list(preview.get("items") or [])
+    errors = list(preview.get("errors") or [])
+    if items:
+        rows = []
+        for item in items:
+            rows.append({
+                "Request ID": item.get("booking_id", ""),
+                "Action": "Reprice" if item.get("needs_repricing") else "Finish PDF/email",
+                "Revision": item.get("revision", ""),
+                "Hotel": item.get("hotel", ""),
+                "Old room EUR": item.get("room_total_old", 0),
+                "New room EUR": item.get("room_total_new", 0),
+                "Old total EUR": item.get("grand_total_old", 0),
+                "New total EUR": item.get("grand_total_new", 0),
+            })
+        st.success(f"{len(items)} booking(s) are ready for processing.")
+        st.dataframe(rows, hide_index=True, width="stretch")
+    else:
+        st.success("No bookings need repricing or invoice completion.")
+
+    if errors:
+        st.error("Some rows require manual review. Processing is blocked until they are corrected.")
+        st.dataframe(
+            [{"Request ID": e.get("booking_id", ""), "Error": e.get("error", "")} for e in errors],
+            hide_index=True,
+            width="stretch",
+        )
+        return
+    if not items:
+        return
+
+    reprice_first = sorted(items, key=lambda item: not bool(item.get("needs_repricing")))
+    max_batch = min(10, len(reprice_first))
+    default_batch = min(5, max_batch)
+    batch_size = st.selectbox(
+        "Bookings to process now",
+        list(range(1, max_batch + 1)),
+        index=default_batch - 1,
+        key="repricing_batch_size",
+    )
+    confirmation = st.text_input(
+        "Type SEND UPDATED INVOICES to confirm",
+        key="repricing_confirmation",
+    )
+    apply_ready = confirmation.strip() == "SEND UPDATED INVOICES"
+    if st.button(
+        f"Process next {batch_size} booking(s)",
+        key="repricing_apply_button",
+        type="primary",
+        disabled=not apply_ready,
+        width="stretch",
+    ):
+        prepared = queued = failed = 0
+        failures: list[str] = []
+        with st.spinner("Updating prices and preparing revised invoices..."):
+            for item in reprice_first[:batch_size]:
+                booking_id = str(item.get("booking_id") or "(missing ID)")
+                try:
+                    result = reprice_booking(item)
+                    if not result.get("ok") or not result.get("saved"):
+                        raise RuntimeError(result.get("error") or "The corrected price was not saved.")
+                    booking = result.get("booking")
+                    if not isinstance(booking, dict):
+                        raise RuntimeError("The saved booking snapshot was not returned.")
+                    documents = process_saved_documents(booking, defer_email=True)
+                    if not documents.saved or not documents.data.get("invoice_created"):
+                        raise RuntimeError(documents.message or "The revised PDF was not stored.")
+                    prepared += 1
+                    if not documents.data.get("customer_email_sent"):
+                        queued += 1
+                except Exception as exc:
+                    failed += 1
+                    failures.append(f"{booking_id}: {exc}")
+        st.session_state.pop("repricing_preview", None)
+        st.session_state.repricing_last_report = {
+            "prepared": prepared,
+            "queued": queued,
+            "failed": failed,
+            "failures": failures,
+        }
+        st.rerun()
 
 
 def first_choices():
@@ -1236,6 +1405,10 @@ def render_request_manager():
             st.button("Edit this request", key="manage_start_edit", type="primary", use_container_width=True, on_click=start_edit_loaded, disabled=not supported)
         else:
             st.info("Contact the organizer to change this request.")
+
+if str(st.query_params.get("maintenance", "")) == "repricing":
+    render_repricing_maintenance()
+    st.stop()
 
 normalize_hotel_state()
 render_header()
