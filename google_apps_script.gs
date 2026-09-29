@@ -6,6 +6,7 @@
  */
 const VERSION = "2026-09-08-v5.9";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
+const TRANSPORTATION_SHEET = "Transportation";
 const BOOKING_HEADERS = [
   "Booking ID","Booking Date","Registration Type","Guest Name","Federation Name","Date of Birth",
   "Passport Number","Nationality","Nationality Code","Phone","Email","Hotel","Meal Plan",
@@ -22,6 +23,13 @@ const INVOICE_HEADERS = [
   "Invoice No","Booking ID","Created At","Customer Name","Customer Email","Grand Total EUR",
   "Invoice File ID","Invoice URL","Invoice Verification Code","Invoice SHA-256","Email Status","Last Error",
   "Revision","Updated At"
+];
+const TRANSPORTATION_HEADERS = [
+  "Transportation ID","Booking ID","Invoice No","Revision","Status","Booking Date","Updated At",
+  "Registration Type","Customer Name","Customer Email","Customer Phone","Hotel","Check-in","Check-out",
+  "Service No","Service Date","Service","Direction","Start Time","End Time","Ends Next Day",
+  "Number of Persons","Seats Reserved","Vehicles","Vehicle Details JSON","Service Total EUR",
+  "Booking Transportation Total EUR","Transportation Rate Version"
 ];
 const HISTORY_SHEET = "Request History";
 const HISTORY_HEADERS = ["Booking ID","Revision","Archived At","Booking JSON","Status"];
@@ -364,7 +372,9 @@ function createBooking_(raw,invoice) {
       if (!existing["Request Hash"] || requestHash_(raw)!==existing["Request Hash"])
         throw codedError_("ID_CONFLICT","This request ID is already in use. Contact the organizer.");
       if (["Cancelled","Rejected"].indexOf(String(existing.Status))>=0) throw codedError_("CANCELLED","This request is no longer active.");
-      return {booking:JSON.parse(existing["Booking JSON"]),row:existing};
+      const existingBooking=JSON.parse(existing["Booking JSON"]);
+      safeReplaceTransportationRows_(existingBooking,existing.Status);
+      return {booking:existingBooking,row:existing};
     }
     const b=normalizeBooking_(raw);
     if (b.revision!==1) throw codedError_("VALIDATION_ERROR","A new request must start at revision 1.");
@@ -380,6 +390,7 @@ function createBooking_(raw,invoice) {
     data["Customer Email Sent"]=false;
     // This single durable row is also the inventory reservation. No separate decrement.
     writeRow_(ctx,0,data);
+    safeReplaceTransportationRows_(b,data.Status);
     SpreadsheetApp.flush();
     return {booking:b,row:data};
   });
@@ -404,6 +415,118 @@ function bookingColumns_(b) {
     "Room Total EUR":b.room_total_eur,"Transportation Total EUR":b.transport_total_eur,"Grand Total EUR":b.grand_total_eur,
     "Invoice No":b.invoice_no,"Invoice Verification Code":b.invoice_verification_code,"Schema Version":VERSION,
     "Revision":b.revision||1,"Updated At":b.updated_at||b.booking_date};
+}
+
+/**
+ * Readable transportation register.
+ *
+ * Bookings remains the authoritative source and keeps Transportation JSON so
+ * OTP amendments, invoices and retries stay backward compatible. This sheet
+ * is a synchronized view with one row per transportation service.
+ */
+function transportationRows_(b,status) {
+  const services=Array.isArray(b.transport_services)?b.transport_services:[];
+  const customer=b.federation_name||b.guest_name||"";
+  return services.map(function(item,index) {
+    const vehicles=item.vehicles && typeof item.vehicles==="object" && !Array.isArray(item.vehicles)
+      ? item.vehicles:{};
+    const summary=Object.keys(vehicles).filter(name=>Number(vehicles[name])>0)
+      .map(name=>name+" x"+Number(vehicles[name])).join("; ");
+    const details=Array.isArray(item.vehicle_lines)?item.vehicle_lines:
+      Object.keys(vehicles).filter(name=>Number(vehicles[name])>0)
+        .map(name=>({vehicle:name,quantity:Number(vehicles[name])}));
+    return {
+      "Transportation ID":b.booking_id+"-T"+String(index+1).padStart(2,"0"),
+      "Booking ID":b.booking_id,"Invoice No":b.invoice_no||"","Revision":b.revision||1,
+      "Status":status||b.status||"","Booking Date":b.booking_date||"",
+      "Updated At":b.updated_at||b.booking_date||"","Registration Type":b.registration_type||"",
+      "Customer Name":customer,"Customer Email":b.email||"","Customer Phone":b.phone||"",
+      "Hotel":b.hotel||"","Check-in":b.check_in||"","Check-out":b.check_out||"",
+      "Service No":index+1,"Service Date":item.date||"","Service":item.service||"",
+      "Direction":item.direction||"","Start Time":item.start_time||"","End Time":item.end_time||"",
+      "Ends Next Day":item.ends_next_day===true,"Number of Persons":Number(item.persons||0),
+      "Seats Reserved":Number(item.seats||0),"Vehicles":summary,
+      "Vehicle Details JSON":JSON.stringify(details),"Service Total EUR":Number(item.total_eur||0),
+      "Booking Transportation Total EUR":Number(b.transport_total_eur||0),
+      "Transportation Rate Version":b.transport_rate_version||""
+    };
+  });
+}
+function appendTransportationRows_(ctx,dataRows) {
+  if (!dataRows.length) return;
+  const start=ctx.sheet.getLastRow()+1,required=start+dataRows.length-1;
+  if (required>ctx.sheet.getMaxRows()) ctx.sheet.insertRowsAfter(ctx.sheet.getMaxRows(),required-ctx.sheet.getMaxRows());
+  const batchSize=500;
+  for (let offset=0;offset<dataRows.length;offset+=batchSize) {
+    const batch=dataRows.slice(offset,offset+batchSize);
+    const values=batch.map(data=>ctx.headers.map(function(header) {
+      const value=Object.prototype.hasOwnProperty.call(data,header)?data[header]:"";
+      return typeof value==="string" && /^[=+@\-]/.test(value)?"'"+value:value;
+    }));
+    const range=ctx.sheet.getRange(start+offset,1,values.length,ctx.headers.length);
+    range.setNumberFormat("@"); range.setValues(values);
+  }
+}
+function replaceTransportationRows_(b,status) {
+  const ctx=ensureSheet_(TRANSPORTATION_SHEET,TRANSPORTATION_HEADERS);
+  rows_(ctx).filter(row=>isManagedTransportationRow_(row) && String(row["Booking ID"])===String(b.booking_id))
+    .sort((a,b)=>b._row-a._row).forEach(row=>ctx.sheet.deleteRow(row._row));
+  appendTransportationRows_(ctx,transportationRows_(b,status));
+}
+function isManagedTransportationRow_(row) {
+  return /^ITKF-\d{8}-[A-F0-9]{12}-T\d+$/.test(String(row["Transportation ID"]||""));
+}
+function safeReplaceTransportationRows_(b,status) {
+  try { replaceTransportationRows_(b,status); }
+  catch(e) { console.error("Transportation sync pending for "+String(b && b.booking_id||"")+": "+safeError_(e)); }
+}
+function transportationBookingFromRow_(row) {
+  let b={};
+  if (row["Booking JSON"]) {
+    try { b=JSON.parse(row["Booking JSON"]); } catch(e) { b={}; }
+  }
+  if (!Array.isArray(b.transport_services)) {
+    try { b.transport_services=JSON.parse(row["Transportation JSON"]||"[]"); }
+    catch(e) { b.transport_services=[]; }
+  }
+  return Object.assign(b,{
+    booking_id:b.booking_id||row["Booking ID"],invoice_no:b.invoice_no||row["Invoice No"],
+    revision:Number(row.Revision||b.revision||1),booking_date:b.booking_date||row["Booking Date"],
+    updated_at:row["Updated At"]||b.updated_at||b.booking_date||row["Booking Date"],
+    registration_type:b.registration_type||row["Registration Type"],
+    guest_name:b.guest_name||row["Guest Name"],federation_name:b.federation_name||row["Federation Name"],
+    email:b.email||row.Email,phone:b.phone||row.Phone,hotel:b.hotel||row.Hotel,
+    check_in:b.check_in||row["Check-in"],check_out:b.check_out||row["Check-out"],
+    transport_total_eur:Number(row["Transportation Total EUR"]!==""?row["Transportation Total EUR"]:b.transport_total_eur||0),
+    transport_rate_version:b.transport_rate_version||row["Transportation Rate Version"]||""
+  });
+}
+function rebuildTransportationSheet_() {
+  const ctx=ensureSheet_(TRANSPORTATION_SHEET,TRANSPORTATION_HEADERS);
+  // Only replace rows generated by this script. Any unrelated/manual rows in
+  // a pre-existing sheet with the same name are left untouched.
+  rows_(ctx).filter(isManagedTransportationRow_).sort((a,b)=>b._row-a._row)
+    .forEach(row=>ctx.sheet.deleteRow(row._row));
+  const output=[];
+  rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)).forEach(function(row) {
+    if (!row["Booking ID"]) return;
+    const b=transportationBookingFromRow_(row);
+    transportationRows_(b,row.Status).forEach(item=>output.push(item));
+  });
+  appendTransportationRows_(ctx,output);
+  return output.length;
+}
+function rebuildTransportationSheetNow() {
+  const count=locked_(function() { const n=rebuildTransportationSheet_(); SpreadsheetApp.flush(); return n; });
+  console.log("Transportation sheet rebuilt: "+count+" service row(s).");
+}
+function ensureTransportationChangeTrigger_() {
+  if (ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==="syncTransportationAfterSheetChange")) return;
+  const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
+  ScriptApp.newTrigger("syncTransportationAfterSheetChange").forSpreadsheet(ss).onChange().create();
+}
+function syncTransportationAfterSheetChange(e) {
+  if (e && e.changeType==="REMOVE_ROW") rebuildTransportationSheetNow();
 }
 function invoiceNumber_(id,revision) {
   return "INV-"+id.replace(/^ITKF-/,"")+(revision>1?"-R"+revision:"");
@@ -507,6 +630,7 @@ function repriceBooking_(req) {
       throw codedError_("EDIT_CONFLICT","This request changed after the preview. Run the preview again.");
     const state=repricingState_(row);
     if (!state || !state.needs_repricing) {
+      if (row["Booking JSON"]) safeReplaceTransportationRows_(JSON.parse(row["Booking JSON"]),row.Status);
       return Object.assign(result_(row,"The corrected price is already stored.",false),
         {repriced:false,already_current:true});
     }
@@ -522,7 +646,9 @@ function repriceBooking_(req) {
       "Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"",
       "Customer Email Sent":false,"Email Sent At":"","Last Error":""
     });
-    writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush();
+    writeRow_(ctx,row._row,changes,row);
+    safeReplaceTransportationRows_(b,row.Status);
+    SpreadsheetApp.flush();
     const savedRow=Object.assign(row,changes);
     return Object.assign(result_(savedRow,"The corrected price was saved; the revised PDF/email is pending.",false),
       {repriced:true,room_total_old:state.room_total_old,room_total_new:b.room_total_eur,
@@ -638,7 +764,9 @@ function amendBooking_(raw,invoice,req) {
     // A lost response can be retried without another revision, room hold or email.
     if (row["Last Edit ID"]===operation) {
       if (!equal_(row["Request Hash"],requestHash_(raw))) throw codedError_("ID_CONFLICT","This edit attempt already saved different details. Reload the request.");
-      return {booking:JSON.parse(row["Booking JSON"]),row:row};
+      const savedBooking=JSON.parse(row["Booking JSON"]);
+      safeReplaceTransportationRows_(savedBooking,row.Status);
+      return {booking:savedBooking,row:row};
     }
     const revision=Number(row.Revision||1);
     if (int_(req.expected_revision,"revision",100000,false)!==revision)
@@ -664,7 +792,9 @@ function amendBooking_(raw,invoice,req) {
       "Last Edit ID":operation,"Status":row.Status,"Document Status":"Pending","Processing Started":"","Document Lease":"",
       "Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"","Customer Email Sent":false,"Email Sent At":"","Last Error":""});
     // Replace the existing row atomically under the inventory lock; never append a new booking.
-    writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush();
+    writeRow_(ctx,row._row,changes,row);
+    safeReplaceTransportationRows_(b,row.Status);
+    SpreadsheetApp.flush();
     return {booking:b,row:Object.assign(row,changes)};
   });
   if (invoice && invoice.base64) {
@@ -687,6 +817,9 @@ function processDocuments_(b,payload,forceCheck,deferEmail,includePdf) {
     if (!row) throw codedError_("SERVER_ERROR","Saved request could not be located.");
     if (["Cancelled","Rejected"].indexOf(String(row.Status))>=0) throw codedError_("EDIT_CLOSED","This request is no longer active.");
     if (row["Invoice No"]!==b.invoice_no) throw codedError_("EDIT_CONFLICT","A newer request revision exists. Reload the request.");
+    // A second non-blocking synchronization chance after the durable booking
+    // save. Transportation reporting must never prevent PDF/email processing.
+    safeReplaceTransportationRows_(b,row.Status);
     const started=Date.parse(String(row["Processing Started"]||""));
     if (row["Document Status"]==="Processing" && started && Date.now()-started<10*60*1000)
       return {done:true,row:row};
@@ -850,8 +983,12 @@ function updateBooking_(id,changes) {
   return locked_(function() {
     const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), row=find_(ctx,"Booking ID",id);
     if (!row) throw Error("Request row is missing.");
-    writeRow_(ctx,row._row,changes,row); SpreadsheetApp.flush();
-    return Object.assign(row,changes);
+    writeRow_(ctx,row._row,changes,row);
+    const updated=Object.assign(row,changes);
+    if (Object.prototype.hasOwnProperty.call(changes,"Status") && updated["Booking JSON"])
+      safeReplaceTransportationRows_(JSON.parse(updated["Booking JSON"]),updated.Status);
+    SpreadsheetApp.flush();
+    return updated;
   });
 }
 function updateDocument_(b,token,changes) {
@@ -937,11 +1074,14 @@ function setupSheetsNow() {
     ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS);
     ensureSheet_(INVOICES_SHEET,INVOICE_HEADERS);
     ensureSheet_(HISTORY_SHEET,HISTORY_HEADERS);
+    ensureSheet_(TRANSPORTATION_SHEET,TRANSPORTATION_HEADERS);
     const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS);
     syncOfficialInventory_(ctx);
+    rebuildTransportationSheet_();
     SpreadsheetApp.flush();
   });
-  console.log("Setup complete. Existing bookings were preserved and official room capacities were synchronized.");
+  ensureTransportationChangeTrigger_();
+  console.log("Setup complete. Existing bookings were preserved; room capacities and transportation rows were synchronized.");
 }
 function syncOfficialRoomInventoryNow() {
   locked_(function() {
@@ -957,6 +1097,7 @@ function diagnoseBackend() {
   const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
   DriveApp.getFolderById(optionalProp_("INVOICE_FOLDER_ID") || prop_("DRIVE_FOLDER_ID")).getName();
   console.log(JSON.stringify({version:VERSION,bookings_sheet_exists:Boolean(ss.getSheetByName(BOOKINGS_SHEET)),
+    transportation_sheet_exists:Boolean(ss.getSheetByName(TRANSPORTATION_SHEET)),
     inventory_sheet_exists:Boolean(ss.getSheetByName(INVENTORY_SHEET)),email_quota_remaining:MailApp.getRemainingDailyQuota()}));
 }
 function retryPendingEmails() {
