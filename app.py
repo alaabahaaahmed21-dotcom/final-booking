@@ -29,18 +29,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-if APP_SCHEMA_VERSION != "2026-10-07-v6.0":
-    st.error("This app needs the matching v6.0 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
+if APP_SCHEMA_VERSION != "2026-09-08-v5.9":
+    st.error("This app needs the matching v5.9 config.py and Google backend. Upload all supplied update files together, deploy the matching Google code, then reboot the app.")
     st.stop()
 
 try:
     from sheets import (backend_is_configured, save_to_google_sheets, check_availability, check_all_availability,
                         request_edit_code, verify_edit_code, load_request, retry_request_documents,
-                        process_saved_documents, preview_repricing, reprice_booking,
-                        request_registration_email_code, verify_registration_email_code,
-                        admin_load_booking, admin_update_booking_email)
+                        process_saved_documents, preview_repricing, reprice_booking)
 except ImportError:
-    st.error("Upload the matching v6.0 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
+    st.error("Upload the matching v5.9 sheets.py, pdf_generator.py and requirements.txt beside app.py, then reboot the app. All supplied update files must be installed together.")
     st.stop()
 
 
@@ -497,13 +495,6 @@ def _repricing_password() -> str:
     except Exception:
         return ""
 
-def _invoice_admin_password() -> str:
-    """Use a dedicated recovery password, with the existing maintenance secret as fallback."""
-    try:
-        return str(st.secrets.get("INVOICE_ADMIN_PASSWORD", "")).strip() or _repricing_password()
-    except Exception:
-        return ""
-
 
 def _load_all_repricing_candidates() -> tuple[list[dict], list[dict]]:
     """Load every PII-free preview page while requiring forward progress."""
@@ -554,7 +545,6 @@ def render_repricing_maintenance() -> None:
         st.session_state.pop("repricing_authenticated", None)
         st.session_state.pop("repricing_preview", None)
         st.rerun()
-
 
     st.warning(
         "Always preview first. Applying creates a new revision and queues a revised invoice "
@@ -666,92 +656,6 @@ def render_repricing_maintenance() -> None:
         st.rerun()
 
 
-def render_invoice_maintenance() -> None:
-    """Organizer-only recovery for pending invoices and verified email corrections."""
-    render_header()
-    section_title("🔐", "Pending Invoice Recovery")
-    st.caption("Organizer-only. This does not bypass the customer OTP used to edit booking details.")
-    password = _invoice_admin_password()
-    if not password:
-        st.error("This page is disabled. Add INVOICE_ADMIN_PASSWORD to Streamlit Secrets, then reboot the app.")
-        return
-    if not st.session_state.get("invoice_admin_authenticated"):
-        with st.form("invoice_admin_login"):
-            entered = st.text_input("Maintenance password", type="password")
-            submitted = st.form_submit_button("Open invoice recovery", type="primary")
-        if submitted:
-            if hmac.compare_digest(entered, password):
-                st.session_state.invoice_admin_authenticated = True
-                st.rerun()
-            else:
-                st.error("Incorrect maintenance password.")
-        return
-    if st.button("Lock maintenance page", key="invoice_admin_logout"):
-        for key in ("invoice_admin_authenticated", "invoice_admin_booking"):
-            st.session_state.pop(key, None)
-        st.rerun()
-
-    booking_id = st.text_input("Booking ID", key="invoice_admin_booking_id").strip().upper()
-    if st.button("Load booking", type="primary", disabled=not booking_id):
-        reply = admin_load_booking(booking_id)
-        if reply.get("ok") and reply.get("booking"):
-            st.session_state.invoice_admin_booking = reply
-        else:
-            st.session_state.pop("invoice_admin_booking", None)
-            st.error(reply.get("error", "Booking could not be loaded."))
-    reply = st.session_state.get("invoice_admin_booking")
-    if not reply:
-        return
-    booking = reply["booking"]
-    st.write("Request ID: " + booking["booking_id"])
-    st.write("Name: " + (booking.get("federation_name") or booking.get("guest_name") or "-"))
-    st.write("Invoice: " + booking.get("invoice_no", "-"))
-    st.write("Total: " + format_currency(booking.get("grand_total_eur", 0)))
-    st.write("Saved email: " + booking.get("email", "-"))
-    st.write("PDF: " + ("Created" if reply.get("invoice_created") else "Pending"))
-    st.write("Email delivery: " + ("Sent" if reply.get("customer_email_sent") else "Pending"))
-    with st.form("invoice_admin_email_correction"):
-        corrected = st.text_input("Correct email", value=booking.get("email", ""), max_chars=254)
-        confirmation = st.text_input("Type CORRECT EMAIL to confirm an email change")
-        update = st.form_submit_button("Correct saved email", disabled=confirmation.strip() != "CORRECT EMAIL")
-    if update:
-        changed = admin_update_booking_email(booking["booking_id"], corrected, booking.get("email", ""))
-        if changed.get("ok"):
-            st.success(changed.get("message", "Email corrected."))
-            st.session_state.invoice_admin_booking = admin_load_booking(booking["booking_id"])
-            st.rerun()
-        else:
-            st.error(changed.get("error", "Email could not be corrected."))
-    send_confirmation = st.text_input("Type SEND INVOICE to confirm delivery", key="invoice_admin_send_confirmation")
-    if st.button("Generate & Send Invoice", type="primary", use_container_width=True,
-                 disabled=send_confirmation.strip() != "SEND INVOICE"):
-        current = admin_load_booking(booking["booking_id"])
-        if not current.get("ok") or not current.get("booking"):
-            st.error(current.get("error", "Booking could not be reloaded."))
-        else:
-            with st.spinner("Generating, verifying and emailing the saved invoice..."):
-                documents = process_saved_documents(current["booking"], force_check=True, defer_email=False)
-            if documents.saved and documents.data.get("invoice_created") and documents.data.get("customer_email_sent"):
-                st.success("The verified PDF was saved and emailed successfully.")
-                st.session_state.invoice_admin_booking = admin_load_booking(booking["booking_id"])
-                st.rerun()
-            else:
-                # A saved booking response has a generic success message which
-                # must never be shown as an invoice-delivery error. Explain the
-                # actual document state and keep the booking ready to reload.
-                document_status = str(documents.data.get("document_status") or "").strip()
-                last_error = str(documents.data.get("last_error") or documents.data.get("error") or "").strip()
-                if document_status == "Processing":
-                    st.warning("Invoice processing is already in progress. Wait 10 minutes from the first attempt, reload the booking, then press Generate & Send Invoice once.")
-                elif last_error:
-                    st.error(last_error)
-                elif documents.data.get("invoice_created") and not documents.data.get("customer_email_sent"):
-                    st.error("The PDF was created, but email delivery is still pending. Reload the booking and retry once.")
-                else:
-                    st.error("The invoice is still pending. Wait 10 minutes from the first attempt, reload the booking, then retry once.")
-                st.session_state.invoice_admin_booking = admin_load_booking(booking["booking_id"])
-
-
 def first_choices():
     hotel = next(iter(HOTELS))
     plan = next(iter(HOTELS[hotel]["rates"]))
@@ -780,8 +684,6 @@ DEFAULTS = {
     "wants_transportation": False, "transport_ids": [],
     "last_booking": None, "pending_submission": None, "pending_error": "",
     "edit_context": None, "edit_original": None,
-    "registration_email_code_requested": False,
-    "registration_email_verified": "", "registration_email_token": "",
 }
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
@@ -934,51 +836,6 @@ def normalize_name():
 
 def normalize_passport():
     st.session_state.passport_number = normalize_passport_number(st.session_state.passport_number)
-
-def current_registration_email() -> str:
-    value = st.session_state.individual_email if st.session_state.registration_type == "Individual" else st.session_state.federation_email
-    return str(value or "").strip().lower()
-
-def reset_registration_email_verification():
-    if current_registration_email() != st.session_state.get("registration_email_verified", ""):
-        st.session_state.registration_email_code_requested = False
-        st.session_state.registration_email_verified = ""
-        st.session_state.registration_email_token = ""
-
-def registration_email_is_verified() -> bool:
-    email = current_registration_email()
-    return bool(email and email == st.session_state.get("registration_email_verified")
-                and st.session_state.get("registration_email_token"))
-
-def render_registration_email_verification() -> None:
-    if st.session_state.edit_context:
-        return
-    email = current_registration_email()
-    verified = registration_email_is_verified()
-    if verified:
-        st.success("Email verified. Changing the email will require a new verification code.")
-        return
-    st.warning("Required: verify this email before continuing to the hotel. The code expires in 10 minutes.")
-    field_error("email_verification")
-    if st.button("Send email verification code", disabled=not email, key="send_registration_email_code"):
-        reply = request_registration_email_code(email)
-        if reply.get("ok"):
-            st.session_state.registration_email_code_requested = True
-            st.success(reply.get("message", "Verification code sent."))
-        else:
-            st.error(reply.get("error", "The verification code could not be sent."))
-    if st.session_state.get("registration_email_code_requested"):
-        code = st.text_input("Email verification code (4 digits)", max_chars=4, key="registration_email_code")
-        if st.button("Verify email (required)", type="primary", disabled=len(code.strip()) != 4,
-                     key="verify_registration_email_code"):
-            reply = verify_registration_email_code(email, code)
-            if reply.get("ok"):
-                st.session_state.registration_email_verified = email
-                st.session_state.registration_email_token = reply["email_verification_token"]
-                st.session_state.registration_email_code_requested = False
-                st.rerun()
-            else:
-                st.error(reply.get("error", "The code is incorrect or expired."))
 
 def selected_rooms():
     normalize_hotel_state()
@@ -1178,10 +1035,7 @@ def live_room_availability() -> tuple[dict[str, int], str]:
 
 def validate_page(page):
     if page == "Personal":
-        errors = validate_personal_fields(booking_from_state())
-        if not st.session_state.edit_context and not registration_email_is_verified():
-            errors["email_verification"] = "Email verification is required before continuing."
-        return errors
+        return validate_personal_fields(booking_from_state())
     if page == "Hotel":
         raw = booking_from_state()
         errors = validate_hotel_fields(raw)
@@ -1334,19 +1188,12 @@ def attempt_save(record):
     """Reserve/save the request first; documents are processed after success is visible."""
     st.session_state.pending_submission = record
     with st.spinner("Confirming and saving your request..."):
-        result = (save_to_google_sheets(record, edit_context=st.session_state.edit_context)
-                  if st.session_state.edit_context else
-                  save_to_google_sheets(record, email_verification_token=st.session_state.get("registration_email_token", "")))
+        result = save_to_google_sheets(record, edit_context=st.session_state.edit_context) if st.session_state.edit_context else save_to_google_sheets(record)
     if not result.saved:
         st.session_state.pending_error = result.message
         # Only clear a request when the server explicitly rejected it BEFORE reserving rooms.
-        if result.data.get("error_code") in ("VALIDATION_ERROR", "DUPLICATE_PASSPORT", "SOLD_OUT", "QUOTE_CHANGED", "SCHEMA_VERSION", "NO_CHANGES", "EDIT_IDENTITY", "EDIT_CLOSED", "EMAIL_NOT_VERIFIED"):
+        if result.data.get("error_code") in ("VALIDATION_ERROR", "DUPLICATE_PASSPORT", "SOLD_OUT", "QUOTE_CHANGED", "SCHEMA_VERSION", "NO_CHANGES", "EDIT_IDENTITY", "EDIT_CLOSED"):
             st.session_state.pending_submission = None
-        if result.data.get("error_code") == "EMAIL_NOT_VERIFIED":
-            st.session_state.registration_email_code_requested = False
-            st.session_state.registration_email_verified = ""
-            st.session_state.registration_email_token = ""
-            st.session_state.current_page = "Personal"
         st.rerun()
     booking = {**record, **result.data.get("booking", {}), **result.data}
     st.session_state.last_booking = booking
@@ -1486,20 +1333,13 @@ def render_request_manager():
     if send:
         st.session_state.pop("managed_request", None)
         st.session_state.pop("manage_token", None)
-        st.session_state.manage_code_id = ident.strip().upper()
-        st.session_state.manage_code_email = email.strip()
         reply = request_edit_code(ident, email)
         (st.info if reply.get("ok") else st.error)(reply.get("message") or reply.get("error") or "Please try again.")
     st.caption("Codes expire after 10 minutes. Maximum 5 attempts per code; request a new code if needed. Your edit session lasts one hour.")
     with st.form("verify_code_form"):
-        code = st.text_input("Email verification code (4 digits)", type="password", max_chars=4)
+        code = st.text_input("Email verification code", type="password", max_chars=8)
         verify = st.form_submit_button("Verify & open request", disabled=not backend_is_configured())
     if verify:
-        # Read the keyed values from session state because these inputs live in
-        # the separate send-code form and its local return values are empty on
-        # some Streamlit reruns.
-        ident = st.session_state.get("manage_code_id") or st.session_state.get("manage_id", ident)
-        email = st.session_state.get("manage_code_email") or st.session_state.get("manage_email", email)
         reply = verify_edit_code(ident, email, code)
         if reply.get("ok"):
             st.session_state.manage_token = reply["edit_token"]
@@ -1569,9 +1409,6 @@ def render_request_manager():
 if str(st.query_params.get("maintenance", "")) == "repricing":
     render_repricing_maintenance()
     st.stop()
-if str(st.query_params.get("maintenance", "")) == "invoices":
-    render_invoice_maintenance()
-    st.stop()
 
 normalize_hotel_state()
 render_header()
@@ -1609,19 +1446,16 @@ if page == "Personal":
         input_field("date_input", "Date of Birth *", key="date_of_birth", container=right, min_value=date(1900,1,1), max_value=date.today(), format="YYYY-MM-DD")
         input_field("selectbox", "Nationality *", [c.name for c in countries()], key="nationality", on_change=sync_country)
         input_field("text_input", "Phone Number (including country code) *", key="individual_phone", placeholder="+201012345678")
-        input_field("text_input", "Email *", key="individual_email", max_chars=254,
-                    disabled=bool(st.session_state.edit_context), on_change=reset_registration_email_verification)
+        input_field("text_input", "Email *", key="individual_email", max_chars=254, disabled=bool(st.session_state.edit_context))
     else:
         input_field("text_input", "Federation Name *", key="federation_name", max_chars=150)
         input_field("selectbox", "Federation Country *", [c.name for c in countries()],
                      key="federation_country", index=None, placeholder="Select the federation country")
-        input_field("text_input", "Federation Email *", key="federation_email", max_chars=254,
-                    disabled=bool(st.session_state.edit_context), on_change=reset_registration_email_verification)
+        input_field("text_input", "Federation Email *", key="federation_email", max_chars=254, disabled=bool(st.session_state.edit_context))
         input_field("text_input", "Federation Phone (optional — including country code)", key="federation_phone", placeholder="+201012345678")
     raw = booking_from_state()
     if raw["phone_valid"]:
         st.caption(f"Phone: {raw['phone']}")
-    render_registration_email_verification()
     render_step_navigation(back="Manage" if st.session_state.edit_context else "Registration", next_page="Hotel")
 
 elif page == "Hotel":
@@ -1802,13 +1636,10 @@ elif page == "Complete":
             if not backend_is_configured():
                 st.warning("The booking service is not configured.")
             editing = st.session_state.edit_context
-            email_verified = bool(editing or registration_email_is_verified())
             if editing:
                 st.info("Saving changes updates your existing request, checks room availability, and issues a revised EUR PDF. It does not create another booking.")
-            elif not email_verified:
-                st.warning("Return to Registration Details and verify the email before submitting this booking.")
             if st.button("Save Changes & Send Updated PDF" if editing else "Submit Booking Request", type="primary", use_container_width=True,
-                         disabled=bool(errors) or not backend_is_configured() or not email_verified):
+                         disabled=bool(errors) or not backend_is_configured()):
                 record = {**raw, **calculate_booking_totals(raw),
                           "booking_id": st.session_state.edit_original["booking_id"] if editing else generate_booking_id(),
                           "booking_date": st.session_state.edit_original["booking_date"] if editing else current_timestamp(),
