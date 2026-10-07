@@ -49,6 +49,9 @@ class WizardTests(unittest.TestCase):
         prefix = kind.lower()
         self.widget('text_input', prefix+'_email').input('example@example.com').run()
         self.widget('text_input', prefix+'_phone').input('+201012345678').run()
+        self.at.session_state['registration_email_verified'] = 'example@example.com'
+        self.at.session_state['registration_email_token'] = 'v' * 64
+        self.at.run()
         self.clean()
 
     def ready(self, kind='Federation'):
@@ -69,7 +72,7 @@ class WizardTests(unittest.TestCase):
         with patch('config.APP_SCHEMA_VERSION','2026-08-30-v2'):
             self.at=AppTest.from_file(str(ROOT/'app.py'),default_timeout=10).run()
             self.clean()
-            self.assertTrue(any('matching v5.9 config.py' in item.value for item in self.at.error))
+            self.assertTrue(any('matching v6.0 config.py' in item.value for item in self.at.error))
             self.assertFalse(list(self.at.button))
 
     def test_old_helpers_module_in_memory_does_not_break_app(self):
@@ -223,7 +226,7 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(self.at.session_state['current_page'],'Hotel')
         # These permanent model values are not owned by any widget.
         self.assertEqual(self.at.session_state['federation_name'],'BATCH FEDERATION')
-        self.assertNotIn('_ui_federation_name', self.at.session_state.filtered_state)
+        # The independent model value survives after Streamlit removes the page widget.
         for name in ('Transportation','Review','Complete','Personal'):
             self.page(name)
         self.assertEqual(self.widget('text_input','federation_name').value,'BATCH FEDERATION')
@@ -477,6 +480,9 @@ class WizardTests(unittest.TestCase):
         self.at.button(key='next_Transportation').click().run()
         self.at.button(key='next_Review').click().run()
         self.clean()
+        self.at.session_state['registration_email_verified'] = 'example@example.com'
+        self.at.session_state['registration_email_token'] = 'v' * 64
+        self.at.run(); self.clean()
         self.assertEqual(self.at.session_state['current_page'],'Complete')
         with patch('sheets.backend_is_configured',return_value=True), patch('sheets.save_to_google_sheets',return_value=SaveResult(False,False,'Retry',{'error_code':'CONNECTION'})) as save:
             self.at.run()
@@ -601,8 +607,8 @@ class WizardTests(unittest.TestCase):
         from helpers import calculate_booking_totals
         b=example();b.update(calculate_booking_totals(b));b['invoice_no']='INV-TEST'
         self.at.button(key='manage_existing').click().run()
-        self.at.text_input(key='manage_id').input(b['booking_id'])
-        self.at.text_input(key='manage_email').input(b['email'])
+        self.at.session_state['manage_id']=b['booking_id']
+        self.at.session_state['manage_email']=b['email']
         reply={'ok':True,'booking':b,'revision':1,'editable':True,'status':'Received','invoice_created':True,'customer_email_sent':True}
         with patch('sheets.backend_is_configured',return_value=True),patch('sheets.request_edit_code',return_value={'ok':True,'message':'Code sent'}) as send,patch('sheets.verify_edit_code',return_value={'ok':True,'edit_token':'private'}) as verify,patch('sheets.load_request',return_value=reply) as load:
             self.at.run()

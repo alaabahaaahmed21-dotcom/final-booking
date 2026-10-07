@@ -124,6 +124,13 @@ def request_edit_code(booking_id: str, email: str) -> dict:
     # Never automatically resend an OTP on a lost network response.
     return _post("request_edit_code", {"booking_id": booking_id.strip().upper(), "email": email.strip()}, attempts=1)
 
+def request_registration_email_code(email: str) -> dict:
+    """Send one pre-booking verification code; never retry automatically."""
+    return _post("request_registration_email_code", {"email": email.strip()}, attempts=1)
+
+def verify_registration_email_code(email: str, code: str) -> dict:
+    return _post("verify_registration_email_code", {"email": email.strip(), "code": code.strip()}, attempts=1)
+
 def verify_edit_code(booking_id: str, email: str, code: str) -> dict:
     return _post("verify_edit_code", {"booking_id": booking_id.strip().upper(), "email": email.strip(), "code": code.strip()}, attempts=1)
 
@@ -226,7 +233,18 @@ def retry_request_documents(booking: dict, edit_token: str) -> SaveResult:
     return SaveResult(ok=bool(result.get("ok")), saved=bool(result.get("saved")),
                       message=str(result.get("error") or result.get("message") or ""), data=result)
 
-def save_to_google_sheets(booking: dict, max_attempts: int = 2, edit_context: dict | None = None) -> SaveResult:
+def admin_load_booking(booking_id: str) -> dict:
+    return _decode_pdf(_post("admin_load_booking", {"booking_id": booking_id.strip().upper()}, attempts=1))
+
+def admin_update_booking_email(booking_id: str, new_email: str, expected_email: str) -> dict:
+    return _post("admin_update_booking_email", {
+        "booking_id": booking_id.strip().upper(),
+        "new_email": new_email.strip(),
+        "expected_email": expected_email.strip(),
+    }, attempts=1)
+
+def save_to_google_sheets(booking: dict, max_attempts: int = 2, edit_context: dict | None = None,
+                          email_verification_token: str = "") -> SaveResult:
     """Fast path: validate, reserve inventory and save the booking row only.
 
     PDF generation, Drive storage and customer email are deliberately separated
@@ -240,6 +258,8 @@ def save_to_google_sheets(booking: dict, max_attempts: int = 2, edit_context: di
     body = {"booking": record}
     if edit_context:
         body.update({key: edit_context[key] for key in ("edit_token", "expected_revision", "edit_operation_id")})
+    else:
+        body["email_verification_token"] = str(email_verification_token)
     action = "amend_booking" if edit_context else "create_booking"
     # First attempt is intentionally single-shot. If the network response is
     # lost, query the same durable Request ID before repeating a write. This

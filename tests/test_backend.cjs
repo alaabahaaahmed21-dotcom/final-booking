@@ -27,6 +27,7 @@ class Sheet {
   getLastRow(){return this.data.length;}
   getMaxColumns(){return this.cols;} getMaxRows(){return this.rows;}
   insertColumnsAfter(_,n){this.cols+=n;} insertRowsAfter(_,n){this.rows+=n;}
+  deleteRow(row){this.data.splice(row-1,1);}
   setFrozenRows(){} getRange(...args){return new Range(this,...args);}
 }
 const sheets={},files=new Map(),emails=[],cache=new Map(),triggers=[];let locked=false,busy=false,quota=100,emailCount=0,seq=0;
@@ -40,7 +41,7 @@ const ctx={console,Date,Math,JSON,Object,Array,Number,String,Boolean,Error,Infin
   PropertiesService:{getScriptProperties:()=>({getProperty:n=>scriptProperties[n]??null})},
   LockService:{getScriptLock:()=>({tryLock:()=>{if(busy||locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
   CacheService:{getScriptCache:()=>({get:key=>cache.get(key)||null,put:(key,value)=>cache.set(key,value),remove:key=>cache.delete(key)})},
-  ScriptApp:{getProjectTriggers:()=>triggers,newTrigger:name=>({timeBased(){return this;},everyMinutes(){return this;},create(){const t={getHandlerFunction:()=>name};triggers.push(t);return t;}})},
+  ScriptApp:{getProjectTriggers:()=>triggers,newTrigger:name=>({timeBased(){return this;},everyMinutes(){return this;},forSpreadsheet(){return this;},onChange(){return this;},create(){const t={getHandlerFunction:()=>name};triggers.push(t);return t;}})},
   SpreadsheetApp:{openById:()=>ss,flush:()=>{}},
   DriveApp:{getFolderById:()=>folder,getFileById:id=>{if(!files.has(id))throw Error('File missing');return files.get(id);}},
   MailApp:{getRemainingDailyQuota:()=>quota,sendEmail:message=>{emails.push(message);emailCount++;quota--; }},
@@ -178,6 +179,14 @@ function authenticate(b) {
   const token=call('verifyEditCode_',b.booking_id,b.email,code).edit_token;
   assert(token);return token;
 }
+function verifyRegistrationEmail(email) {
+  const before=emails.length;
+  const reply=call('requestRegistrationEmailCode_',email);
+  assert(reply.ok);assert.equal(emails.length,before+1);
+  const code=emails.at(-1).body.match(/code is: (\d{8})/)[1];
+  const token=call('verifyRegistrationEmailCode_',email,code).email_verification_token;
+  assert.equal(token.length,64);return token;
+}
 const emailBefore=emails.length;
 const hidden=call('requestEditCode_',noPhone.booking_id,'unknown@example.com');
 assert(hidden.ok);assert.equal(emails.length,emailBefore);assert(!hidden.booking);
@@ -274,7 +283,8 @@ failure('EDIT_CLOSED',()=>call('amendBooking_',personal,{}, {edit_token:personTo
 // stored first and the installed trigger delivers the pending email later.
 quota=1000;
 const queued=changed(fixture,'13');queued.check_in='2026-12-10';queued.check_out='2026-12-12';
-const queuedCreate=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',action:'create_booking',booking:queued})}});
+const queuedEmailToken=verifyRegistrationEmail(queued.email);
+const queuedCreate=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',action:'create_booking',booking:queued,email_verification_token:queuedEmailToken})}});
 assert(queuedCreate.saved);assert(!queuedCreate.invoice_created);
 const queuedDocs=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,token:'test-token',action:'process_documents',booking_id:queued.booking_id,invoice:invoice(queued),defer_email:true})}});
 assert(queuedDocs.saved);assert(queuedDocs.invoice_created);assert(!queuedDocs.customer_email_sent);
@@ -323,4 +333,20 @@ assert(repricedRow['Customer Email Sent']);assert.equal(repricedRow['Room Total 
 assert(!call('previewRepricing_',{after_row:1,limit:100}).items.some(item=>item.booking_id===legacyBooking.booking_id));
 const repriceOtpToken=authenticate(repriced.booking);
 assert.equal(call('loadRequest_',repriced.booking.booking_id,repriceOtpToken).revision,2,'OTP editing remains available after repricing');
-console.log('PASS backend: schemas, parity, quotas, retries, passport uniqueness, room holds, OTP, amendments, repricing, revisions, recovery, conflict protection');
+// New registrations require a mailbox grant bound to the exact normalized email.
+failure('VALIDATION_ERROR',()=>call('normalizeEmail_','wrong@example.com.'));
+const verifiedRaw=changed(fixture,'15');verifiedRaw.email='newbooking@example.com';verifiedRaw.check_in='2027-01-02';verifiedRaw.check_out='2027-01-04';
+const verifiedToken=verifyRegistrationEmail(verifiedRaw.email);
+const verifiedCreate=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,
+  token:'test-token',action:'create_booking',booking:verifiedRaw,email_verification_token:verifiedToken})}});
+assert(verifiedCreate.saved);
+const reused=changed(fixture,'16');reused.email=verifiedRaw.email;reused.check_in='2027-01-05';reused.check_out='2027-01-07';
+const reusedResponse=call('doPost',{postData:{contents:JSON.stringify({schema_version:fixture.schema_version,
+  token:'test-token',action:'create_booking',booking:reused,email_verification_token:verifiedToken})}});
+assert.equal(reusedResponse.error_code,'EMAIL_NOT_VERIFIED');
+const repairedEmailResult=call('adminUpdateBookingEmail_',verifiedRaw.booking_id,'corrected@example.com',verifiedRaw.email);
+assert.equal(repairedEmailResult.booking.email,'corrected@example.com');
+const repairedRow=all('Bookings').find(r=>r['Booking ID']===verifiedRaw.booking_id);
+assert.equal(repairedRow.Email,'corrected@example.com');assert.equal(repairedRow['Document Status'],'Pending');
+assert.equal(all('Admin Audit').filter(r=>r['Booking ID']===verifiedRaw.booking_id).length,1);
+console.log('PASS backend: schemas, parity, quotas, retries, passport uniqueness, room holds, OTP, email verification, admin recovery, amendments, repricing, revisions, recovery, conflict protection');

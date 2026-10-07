@@ -1,10 +1,10 @@
 /**
- * ITKF request backend v5. Existing Bookings/Invoices rows are preserved.
+ * ITKF request backend v6. Existing Bookings/Invoices rows are preserved.
  * Properties: SPREADSHEET_ID, BOOKING_API_TOKEN, INVOICE_FOLDER_ID
  * (DRIVE_FOLDER_ID is supported as a fallback invoice folder).
  * Deploy: Execute as Me; Anyone. The token is required for every POST action.
  */
-const VERSION = "2026-09-08-v5.9";
+const VERSION = "2026-10-07-v6.0";
 const BOOKINGS_SHEET = "Bookings", INVOICES_SHEET = "Invoices", INVENTORY_SHEET = "Room Inventory";
 const TRANSPORTATION_SHEET = "Transportation";
 const BOOKING_HEADERS = [
@@ -33,6 +33,15 @@ const TRANSPORTATION_HEADERS = [
 ];
 const HISTORY_SHEET = "Request History";
 const HISTORY_HEADERS = ["Booking ID","Revision","Archived At","Booking JSON","Status"];
+const EMAIL_VERIFICATIONS_SHEET = "Email Verifications";
+const EMAIL_VERIFICATION_HEADERS = [
+  "Email Key","Code Hash","Code Expires","Attempts","Sent At","Window Started","Sends",
+  "Grant Hash","Grant Expires","Used At","Updated At"
+];
+const ADMIN_AUDIT_SHEET = "Admin Audit";
+const ADMIN_AUDIT_HEADERS = [
+  "Timestamp","Action","Booking ID","Invoice No","Old Email","New Email","Details"
+];
 const INVENTORY_HEADERS = ["Hotel","Room Type","Date","Capacity"];
 const ROOM_OCCUPANCY = {"Single":1,"Double":2,"Triple":3,"Quadruple":4,"Suite (2 rooms / 4 persons)":4};
 const TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle";
@@ -131,7 +140,9 @@ function doPost(e) {
       }));
     }
     if (req.action === "booking_status") return json_(bookingStatus_(req));
-    if (req.action === "create_booking") return json_(createBooking_(req.booking || {}, req.invoice || {}));
+    if (req.action === "create_booking") return json_(createBooking_(req.booking || {},req.invoice || {},req.email_verification_token,true));
+    if (req.action === "request_registration_email_code") return json_(requestRegistrationEmailCode_(req.email));
+    if (req.action === "verify_registration_email_code") return json_(verifyRegistrationEmailCode_(req.email,req.code));
     if (req.action === "request_edit_code") return json_(requestEditCode_(req.booking_id,req.email));
     if (req.action === "verify_edit_code") return json_(verifyEditCode_(req.booking_id,req.email,req.code));
     if (req.action === "load_request") return json_(loadRequest_(req.booking_id,req.edit_token));
@@ -149,6 +160,9 @@ function doPost(e) {
       const saved=loadRequest_(req.booking_id,req.edit_token);
       return json_(processDocuments_(saved.booking,req.invoice || {},true,false,true));
     }
+    if (req.action === "admin_load_booking") return json_(adminLoadBooking_(req.booking_id));
+    if (req.action === "admin_update_booking_email")
+      return json_(adminUpdateBookingEmail_(req.booking_id,req.new_email,req.expected_email));
     if (req.action === "check_duplicate") {
       return json_({ok:true,exists:passportExists_(rows_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS)),req.passport_number)});
     }
@@ -248,8 +262,7 @@ function normalizeBooking_(raw) {
   if (["Individual","Federation"].indexOf(type)<0) throw codedError_("VALIDATION_ERROR","Invalid registration type.");
   const name=type==="Individual"?normalizeGuestName_(raw.guest_name):String(raw.federation_name||"").trim();
   if (!name || name.length>150) throw codedError_("VALIDATION_ERROR","Enter a name of up to 150 characters.");
-  const email=String(raw.email||"").trim(), phone=String(raw.phone||"").trim();
-  if (email.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw codedError_("VALIDATION_ERROR","Invalid email address.");
+  const email=normalizeEmail_(raw.email), phone=String(raw.phone||"").trim();
   // Federation phone is optional; an entered number must still be valid.
   // Individual registration continues to require a phone number.
   if ((type==="Individual" || phone!=="") && !/^\+[1-9]\d{6,14}$/.test(phone))
@@ -364,7 +377,7 @@ function availability_(b,bookings,inventoryIndex) {
     return {room_type:room.room_type,requested:room.quantity,remaining:remaining};
   });
 }
-function createBooking_(raw,invoice) {
+function createBooking_(raw,invoice,emailVerificationToken,requireEmailVerification) {
   const saved=locked_(function() {
     const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS), rows=rows_(ctx);
     const existing=rows.find(r=>String(r["Booking ID"])===String(raw.booking_id));
@@ -383,6 +396,7 @@ function createBooking_(raw,invoice) {
     availability_(b,rows).forEach(r=>{
       if (r.requested>r.remaining) throw codedError_("SOLD_OUT",r.room_type+": only "+r.remaining+" room(s) available for these dates.");
     });
+    if (requireEmailVerification===true) consumeEmailVerification_(b.email,emailVerificationToken);
     const data=bookingColumns_(b);
     data["Request Hash"]=requestHash_(raw);
     data["Booking JSON"]=JSON.stringify(b);
@@ -520,6 +534,7 @@ function rebuildTransportationSheetNow() {
   const count=locked_(function() { const n=rebuildTransportationSheet_(); SpreadsheetApp.flush(); return n; });
   console.log("Transportation sheet rebuilt: "+count+" service row(s).");
 }
+
 function ensureTransportationChangeTrigger_() {
   if (ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==="syncTransportationAfterSheetChange")) return;
   const ss=SpreadsheetApp.openById(prop_("SPREADSHEET_ID"));
@@ -715,6 +730,117 @@ function requestEditCode_(id,email) {
         "\nThe code expires in 10 minutes. Do not share it. If you did not request it, ignore this email.",
       name:optionalProp_("COMPANY_NAME")||"Egyptian Traditional Karate Federation"});
     return generic;
+  });
+}
+
+function normalizeEmail_(value) {
+  const email=String(value||"").trim().toLowerCase();
+  if (email.length>254 || email.endsWith(".") || email.indexOf("..")>=0 ||
+      !/^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(email))
+    throw codedError_("VALIDATION_ERROR","Enter a valid email address without spaces or a trailing dot.");
+  return email;
+}
+function requestRegistrationEmailCode_(value) {
+  const email=normalizeEmail_(value),now=Date.now(),key=sha_(email);
+  return locked_(function() {
+    const ctx=ensureSheet_(EMAIL_VERIFICATIONS_SHEET,EMAIL_VERIFICATION_HEADERS);
+    const existing=find_(ctx,"Email Key",key),last=Date.parse(existing&&existing["Sent At"]||"");
+    const windowStart=Date.parse(existing&&existing["Window Started"]||"");
+    const recent=Number.isFinite(windowStart) && now-windowStart<60*60*1000;
+    if (Number.isFinite(last) && now-last<60000)
+      throw codedError_("RATE_LIMIT","Wait 60 seconds before requesting another code.");
+    if (recent && Number(existing.Sends||0)>=5)
+      throw codedError_("RATE_LIMIT","Too many codes were requested. Try again in one hour.");
+    if (MailApp.getRemainingDailyQuota()<1)
+      throw codedError_("EMAIL_QUOTA","Email is temporarily unavailable. Please try again later.");
+    const entropy=digestHex_(Utilities.computeHmacSha256Signature(
+      Utilities.getUuid()+Utilities.getUuid(),prop_("BOOKING_API_TOKEN"),Utilities.Charset.UTF_8));
+    const code=String(parseInt(entropy.slice(0,12),16)%100000000).padStart(8,"0");
+    const data={"Email Key":key,"Code Hash":sha_(key+"|"+code),
+      "Code Expires":new Date(now+10*60000).toISOString(),"Attempts":0,
+      "Sent At":new Date(now).toISOString(),
+      "Window Started":recent?existing["Window Started"]:new Date(now).toISOString(),
+      "Sends":recent?Number(existing.Sends||0)+1:1,"Grant Hash":"","Grant Expires":"",
+      "Used At":"","Updated At":new Date(now).toISOString()};
+    writeRow_(ctx,existing&&existing._row||0,data,existing);
+    SpreadsheetApp.flush();
+    MailApp.sendEmail({to:email,subject:"Verify your email - ITKF Booking",
+      body:"Your email verification code is: "+code+
+        "\nThe code expires in 10 minutes. Do not share it.",
+      name:optionalProp_("COMPANY_NAME")||"Egyptian Traditional Karate Federation"});
+    return {ok:true,message:"A verification code was sent. Check Inbox and Spam."};
+  });
+}
+function verifyRegistrationEmailCode_(value,codeValue) {
+  const email=normalizeEmail_(value),code=String(codeValue||"").trim(),key=sha_(email),now=Date.now();
+  return locked_(function() {
+    const ctx=ensureSheet_(EMAIL_VERIFICATIONS_SHEET,EMAIL_VERIFICATION_HEADERS);
+    const row=find_(ctx,"Email Key",key);
+    const invalid=()=>codedError_("EMAIL_CODE","The code is incorrect or expired. Request a new code if needed.");
+    if (!row || !/^\d{8}$/.test(code) || !row["Code Hash"] ||
+        !Number.isFinite(Date.parse(row["Code Expires"]||"")) || Date.parse(row["Code Expires"])<=now ||
+        Number(row.Attempts||0)>=5) throw invalid();
+    if (!equal_(sha_(key+"|"+code),row["Code Hash"])) {
+      writeRow_(ctx,row._row,{"Attempts":Number(row.Attempts||0)+1,"Updated At":new Date(now).toISOString()},row);
+      SpreadsheetApp.flush(); throw invalid();
+    }
+    const token=Utilities.getUuid().replace(/-/g,"")+Utilities.getUuid().replace(/-/g,"");
+    const expiry=new Date(now+30*60000).toISOString();
+    writeRow_(ctx,row._row,{"Code Hash":"","Code Expires":"","Attempts":0,
+      "Grant Hash":sha_(key+"|"+token),"Grant Expires":expiry,"Used At":"",
+      "Updated At":new Date(now).toISOString()},row);
+    SpreadsheetApp.flush();
+    return {ok:true,email_verification_token:token,expires_at:expiry};
+  });
+}
+function consumeEmailVerification_(value,tokenValue) {
+  const email=normalizeEmail_(value),token=String(tokenValue||""),key=sha_(email),now=Date.now();
+  const ctx=ensureSheet_(EMAIL_VERIFICATIONS_SHEET,EMAIL_VERIFICATION_HEADERS);
+  const row=find_(ctx,"Email Key",key);
+  if (!row || token.length!==64 || row["Used At"] ||
+      !Number.isFinite(Date.parse(row["Grant Expires"]||"")) || Date.parse(row["Grant Expires"])<=now ||
+      !equal_(sha_(key+"|"+token),row["Grant Hash"]))
+    throw codedError_("EMAIL_NOT_VERIFIED","Verify this email address before submitting the booking.");
+  writeRow_(ctx,row._row,{"Used At":new Date(now).toISOString(),"Grant Hash":"","Grant Expires":"",
+    "Updated At":new Date(now).toISOString()},row);
+}
+
+function adminLoadBooking_(id) {
+  id=requestId_(id);
+  return locked_(function() {
+    const row=find_(ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),"Booking ID",id);
+    if (!row || !row["Booking JSON"]) throw codedError_("NOT_FOUND","Booking was not found.");
+    return result_(row,"Booking loaded for organizer recovery.",false);
+  });
+}
+function adminUpdateBookingEmail_(id,newValue,expectedValue) {
+  id=requestId_(id);
+  const newEmail=normalizeEmail_(newValue),expected=String(expectedValue||"").trim().toLowerCase();
+  return locked_(function() {
+    const ctx=ensureSheet_(BOOKINGS_SHEET,BOOKING_HEADERS),row=find_(ctx,"Booking ID",id);
+    if (!row || !row["Booking JSON"]) throw codedError_("NOT_FOUND","Booking was not found.");
+    const b=JSON.parse(row["Booking JSON"]);
+    const oldEmail=String(row.Email||"").trim().toLowerCase();
+    const jsonOld=String(b.email||"").trim().toLowerCase();
+    if (expected && !equal_(oldEmail,expected) && !equal_(jsonOld,expected))
+      throw codedError_("EDIT_CONFLICT","The saved email changed. Reload the booking before correcting it.");
+    if (oldEmail===newEmail && jsonOld===newEmail) return result_(row,"Email is already correct.",false);
+    b.email=newEmail;
+    b.invoice_verification_code=verificationCode_(b);
+    const changes=Object.assign(bookingColumns_(b),{
+      "Booking JSON":JSON.stringify(b),"Request Hash":requestHash_(b),
+      "Invoice File ID":"","Invoice URL":"","Invoice SHA-256":"",
+      "Customer Email Sent":false,"Email Sent At":"","Document Status":"Pending",
+      "Processing Started":"","Document Lease":"","Last Error":""
+    });
+    writeRow_(ctx,row._row,changes,row);
+    safeReplaceTransportationRows_(b,row.Status);
+    const audit=ensureSheet_(ADMIN_AUDIT_SHEET,ADMIN_AUDIT_HEADERS);
+    writeRow_(audit,0,{"Timestamp":new Date().toISOString(),"Action":"CORRECT_EMAIL",
+      "Booking ID":id,"Invoice No":b.invoice_no,"Old Email":jsonOld||oldEmail,
+      "New Email":newEmail,"Details":"Invoice reset for verified regeneration and delivery."});
+    SpreadsheetApp.flush();
+    return result_(Object.assign({},row,changes),"Email corrected. Generate and send the invoice now.",false);
   });
 }
 function verifyEditCode_(id,email,code) {
@@ -1075,6 +1201,8 @@ function setupSheetsNow() {
     ensureSheet_(INVOICES_SHEET,INVOICE_HEADERS);
     ensureSheet_(HISTORY_SHEET,HISTORY_HEADERS);
     ensureSheet_(TRANSPORTATION_SHEET,TRANSPORTATION_HEADERS);
+    ensureSheet_(EMAIL_VERIFICATIONS_SHEET,EMAIL_VERIFICATION_HEADERS);
+    ensureSheet_(ADMIN_AUDIT_SHEET,ADMIN_AUDIT_HEADERS);
     const ctx=ensureSheet_(INVENTORY_SHEET,INVENTORY_HEADERS);
     syncOfficialInventory_(ctx);
     rebuildTransportationSheet_();

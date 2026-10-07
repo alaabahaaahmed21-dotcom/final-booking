@@ -169,7 +169,7 @@ ROOM_INVENTORY = {
 # Transportation - final approved quotation. EUR per complete vehicle.
 # Source: Transportation_Rates_Official(1).xlsx and nakal_prices.xlsx.
 # ---------------------------------------------------------------------------
-APP_SCHEMA_VERSION = "2026-09-08-v5.9"
+APP_SCHEMA_VERSION = "2026-10-07-v6.0"
 TRANSPORT_RATE_VERSION = "2026-08-30-final-full-vehicle"
 TRANSPORT_SERVICES = {
     "Airport Transfer": {"label": "Airport / Hotel - One-way Transfer", "max_hours": None,
