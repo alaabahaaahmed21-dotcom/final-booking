@@ -118,6 +118,16 @@ class WizardTests(unittest.TestCase):
         self.clean()
         self.assertEqual(self.at.session_state['current_page'], 'Hotel')
 
+    def test_email_verification_is_required_before_hotel(self):
+        self.choose()
+        self.widget('text_input', 'federation_name').input('TEST FEDERATION').run()
+        self.widget('selectbox', 'federation_country').select('Egypt').run()
+        self.widget('text_input', 'federation_email').input('example@example.com').run()
+        self.at.button(key='next_Personal').click().run()
+        self.clean()
+        self.assertEqual(self.at.session_state['current_page'], 'Personal')
+        self.assertIn('Email verification is required before continuing.', [m.value for m in self.at.error])
+
     def test_individual_retains_fields_and_automatic_guests(self):
         self.choose('Individual')
         self.widget('text_input', key='guest_name').input('alaa bahaa').run()
@@ -221,6 +231,8 @@ class WizardTests(unittest.TestCase):
         self.widget('selectbox', 'federation_country').select('Germany')
         self.widget('text_input', 'federation_email').input('batch@example.com')
         self.widget('text_input', 'federation_phone').input('+201012345678')
+        self.at.session_state['registration_email_verified'] = 'batch@example.com'
+        self.at.session_state['registration_email_token'] = 'v' * 64
         self.at.button(key='next_Personal').click().run()
         self.clean()
         self.assertEqual(self.at.session_state['current_page'],'Hotel')
@@ -473,6 +485,8 @@ class WizardTests(unittest.TestCase):
         self.widget('text_input','federation_name').input('NO PHONE FEDERATION')
         self.widget('selectbox','federation_country').select('Egypt')
         self.widget('text_input','federation_email').input('example@example.com')
+        self.at.session_state['registration_email_verified'] = 'example@example.com'
+        self.at.session_state['registration_email_token'] = 'v' * 64
         self.at.button(key='next_Personal').click().run()
         self.clean()
         self.assertEqual(self.at.session_state['current_page'],'Hotel')
@@ -480,8 +494,6 @@ class WizardTests(unittest.TestCase):
         self.at.button(key='next_Transportation').click().run()
         self.at.button(key='next_Review').click().run()
         self.clean()
-        self.at.session_state['registration_email_verified'] = 'example@example.com'
-        self.at.session_state['registration_email_token'] = 'v' * 64
         self.at.run(); self.clean()
         self.assertEqual(self.at.session_state['current_page'],'Complete')
         with patch('sheets.backend_is_configured',return_value=True), patch('sheets.save_to_google_sheets',return_value=SaveResult(False,False,'Retry',{'error_code':'CONNECTION'})) as save:
@@ -614,9 +626,9 @@ class WizardTests(unittest.TestCase):
             self.at.run()
             next(w for w in self.at.button if w.label=='Send verification code').click().run();self.clean()
             send.assert_called_once();load.assert_not_called()
-            next(w for w in self.at.text_input if w.label=='Email verification code').input('12345678')
+            next(w for w in self.at.text_input if w.label=='Email verification code (4 digits)').input('1234')
             next(w for w in self.at.button if w.label=='Verify & open request').click().run();self.clean()
-            verify.assert_called_once_with(b['booking_id'],b['email'],'12345678')
+            verify.assert_called_once_with(b['booking_id'],b['email'],'1234')
             load.assert_called_once_with(b['booking_id'],'private')
             self.assertTrue(any(w.key=='manage_start_edit' for w in self.at.button))
 

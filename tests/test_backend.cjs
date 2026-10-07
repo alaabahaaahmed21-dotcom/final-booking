@@ -175,7 +175,7 @@ function authenticate(b) {
   const before=emails.length;
   const reply=call('requestEditCode_',b.booking_id,b.email);
   assert(reply.ok);assert.equal(emails.length,before+1);
-  const code=emails.at(-1).body.match(/code is: (\d{8})/)[1];
+  const code=emails.at(-1).body.match(/code is: (\d{4})/)[1];
   const token=call('verifyEditCode_',b.booking_id,b.email,code).edit_token;
   assert(token);return token;
 }
@@ -183,7 +183,7 @@ function verifyRegistrationEmail(email) {
   const before=emails.length;
   const reply=call('requestRegistrationEmailCode_',email);
   assert(reply.ok);assert.equal(emails.length,before+1);
-  const code=emails.at(-1).body.match(/code is: (\d{8})/)[1];
+  const code=emails.at(-1).body.match(/code is: (\d{4})/)[1];
   const token=call('verifyRegistrationEmailCode_',email,code).email_verification_token;
   assert.equal(token.length,64);return token;
 }
@@ -196,7 +196,7 @@ assert.equal(loaded.booking.email,noPhone.email);assert.equal(loaded.revision,1)
 assert(loaded.invoice_base64);assert(loaded.editable);
 assert(!JSON.stringify(loaded).includes('Edit Grant Hash'));
 failure('EDIT_AUTH',()=>call('loadRequest_',noPhone.booking_id,'bad-token'));
-failure('EDIT_CODE',()=>call('verifyEditCode_',noPhone.booking_id,noPhone.email,emails.at(-1).body.match(/code is: (\d{8})/)[1]));
+failure('EDIT_CODE',()=>call('verifyEditCode_',noPhone.booking_id,noPhone.email,emails.at(-1).body.match(/code is: (\d{4})/)[1]));
 const requestCount=all('Bookings').length, invoiceCount=all('Invoices').length;
 let edited=clone(loaded.booking);
 edited.rooms[0].quantity=2;edited.grand_total_eur+=edited.rooms[0].unit_rate_eur*edited.rooms[0].persons_per_room*edited.nights;
@@ -270,7 +270,7 @@ failure('DUPLICATE_PASSPORT',()=>call('amendBooking_',personal,{}, {edit_token:p
 // Bad OTP attempts and expiration do not grant access; send cooldown limits abuse.
 call('updateBooking_',otherPerson.booking_id,{'Edit Code Sent At':''});
 call('requestEditCode_',otherPerson.booking_id,otherPerson.email);
-const correct=emails.at(-1).body.match(/code is: (\d{8})/)[1], sends=emails.length;
+const correct=emails.at(-1).body.match(/code is: (\d{4})/)[1], sends=emails.length;
 call('requestEditCode_',otherPerson.booking_id,otherPerson.email);assert.equal(emails.length,sends);
 for(let i=0;i<5;i++) failure('EDIT_CODE',()=>call('verifyEditCode_',otherPerson.booking_id,otherPerson.email,'xxxxxxxx'));
 failure('EDIT_CODE',()=>call('verifyEditCode_',otherPerson.booking_id,otherPerson.email,correct));

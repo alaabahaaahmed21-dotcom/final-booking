@@ -736,7 +736,20 @@ def render_invoice_maintenance() -> None:
                 st.session_state.invoice_admin_booking = admin_load_booking(booking["booking_id"])
                 st.rerun()
             else:
-                st.error(documents.message or documents.data.get("error") or "Invoice delivery is still pending.")
+                # A saved booking response has a generic success message which
+                # must never be shown as an invoice-delivery error. Explain the
+                # actual document state and keep the booking ready to reload.
+                document_status = str(documents.data.get("document_status") or "").strip()
+                last_error = str(documents.data.get("last_error") or documents.data.get("error") or "").strip()
+                if document_status == "Processing":
+                    st.warning("Invoice processing is already in progress. Wait 10 minutes from the first attempt, reload the booking, then press Generate & Send Invoice once.")
+                elif last_error:
+                    st.error(last_error)
+                elif documents.data.get("invoice_created") and not documents.data.get("customer_email_sent"):
+                    st.error("The PDF was created, but email delivery is still pending. Reload the booking and retry once.")
+                else:
+                    st.error("The invoice is still pending. Wait 10 minutes from the first attempt, reload the booking, then retry once.")
+                st.session_state.invoice_admin_booking = admin_load_booking(booking["booking_id"])
 
 
 def first_choices():
@@ -955,8 +968,8 @@ def render_registration_email_verification() -> None:
         else:
             st.error(reply.get("error", "The verification code could not be sent."))
     if st.session_state.get("registration_email_code_requested"):
-        code = st.text_input("Email verification code", max_chars=8, key="registration_email_code")
-        if st.button("Verify email (required)", type="primary", disabled=len(code.strip()) != 8,
+        code = st.text_input("Email verification code (4 digits)", max_chars=4, key="registration_email_code")
+        if st.button("Verify email (required)", type="primary", disabled=len(code.strip()) != 4,
                      key="verify_registration_email_code"):
             reply = verify_registration_email_code(email, code)
             if reply.get("ok"):
@@ -1479,7 +1492,7 @@ def render_request_manager():
         (st.info if reply.get("ok") else st.error)(reply.get("message") or reply.get("error") or "Please try again.")
     st.caption("Codes expire after 10 minutes. Maximum 5 attempts per code; request a new code if needed. Your edit session lasts one hour.")
     with st.form("verify_code_form"):
-        code = st.text_input("Email verification code", type="password", max_chars=8)
+        code = st.text_input("Email verification code (4 digits)", type="password", max_chars=4)
         verify = st.form_submit_button("Verify & open request", disabled=not backend_is_configured())
     if verify:
         # Read the keyed values from session state because these inputs live in

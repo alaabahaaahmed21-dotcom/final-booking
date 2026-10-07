@@ -719,7 +719,7 @@ function requestEditCode_(id,email) {
     if (MailApp.getRemainingDailyQuota()<1) throw codedError_("EMAIL_QUOTA","Email is temporarily unavailable. Please try later or contact the organizer.");
     // UUID entropy is HMAC-mixed; never use Math.random for authentication.
     const entropy=digestHex_(Utilities.computeHmacSha256Signature(Utilities.getUuid()+Utilities.getUuid(),prop_("BOOKING_API_TOKEN"),Utilities.Charset.UTF_8));
-    const code=String(parseInt(entropy.slice(0,12),16)%100000000).padStart(8,"0");
+    const code=String(parseInt(entropy.slice(0,12),16)%10000).padStart(4,"0");
     writeRow_(ctx,row._row,{"Edit Code Hash":sha_(id+"|"+code),"Edit Code Expires":new Date(now+10*60000).toISOString(),
       "Edit Code Attempts":0,"Edit Code Sent At":new Date(now).toISOString(),
       "Edit Code Window":recent?row["Edit Code Window"]:new Date(now).toISOString(),
@@ -755,7 +755,7 @@ function requestRegistrationEmailCode_(value) {
       throw codedError_("EMAIL_QUOTA","Email is temporarily unavailable. Please try again later.");
     const entropy=digestHex_(Utilities.computeHmacSha256Signature(
       Utilities.getUuid()+Utilities.getUuid(),prop_("BOOKING_API_TOKEN"),Utilities.Charset.UTF_8));
-    const code=String(parseInt(entropy.slice(0,12),16)%100000000).padStart(8,"0");
+    const code=String(parseInt(entropy.slice(0,12),16)%10000).padStart(4,"0");
     const data={"Email Key":key,"Code Hash":sha_(key+"|"+code),
       "Code Expires":new Date(now+10*60000).toISOString(),"Attempts":0,
       "Sent At":new Date(now).toISOString(),
@@ -777,7 +777,7 @@ function verifyRegistrationEmailCode_(value,codeValue) {
     const ctx=ensureSheet_(EMAIL_VERIFICATIONS_SHEET,EMAIL_VERIFICATION_HEADERS);
     const row=find_(ctx,"Email Key",key);
     const invalid=()=>codedError_("EMAIL_CODE","The code is incorrect or expired. Request a new code if needed.");
-    if (!row || !/^\d{8}$/.test(code) || !row["Code Hash"] ||
+    if (!row || !/^\d{4}$/.test(code) || !row["Code Hash"] ||
         !Number.isFinite(Date.parse(row["Code Expires"]||"")) || Date.parse(row["Code Expires"])<=now ||
         Number(row.Attempts||0)>=5) throw invalid();
     if (!equal_(sha_(key+"|"+code),row["Code Hash"])) {
@@ -851,7 +851,7 @@ function verifyEditCode_(id,email,code) {
     if (!row || String(row.Email).trim().toLowerCase()!==email || !row["Edit Code Hash"] ||
         !Number.isFinite(Date.parse(row["Edit Code Expires"]||"")) || Date.parse(row["Edit Code Expires"])<=Date.now() ||
         Number(row["Edit Code Attempts"]||0)>=5) throw invalid();
-    if (!/^\d{8}$/.test(code) || !equal_(sha_(id+"|"+code),row["Edit Code Hash"])) {
+    if (!/^\d{4}$/.test(code) || !equal_(sha_(id+"|"+code),row["Edit Code Hash"])) {
       writeRow_(ctx,row._row,{"Edit Code Attempts":Number(row["Edit Code Attempts"]||0)+1},row);
       SpreadsheetApp.flush(); throw invalid();
     }
