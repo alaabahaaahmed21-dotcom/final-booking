@@ -932,16 +932,21 @@ def reset_registration_email_verification():
         st.session_state.registration_email_verified = ""
         st.session_state.registration_email_token = ""
 
+def registration_email_is_verified() -> bool:
+    email = current_registration_email()
+    return bool(email and email == st.session_state.get("registration_email_verified")
+                and st.session_state.get("registration_email_token"))
+
 def render_registration_email_verification() -> None:
     if st.session_state.edit_context:
         return
     email = current_registration_email()
-    verified = bool(email and email == st.session_state.get("registration_email_verified")
-                    and st.session_state.get("registration_email_token"))
+    verified = registration_email_is_verified()
     if verified:
         st.success("Email verified. Changing the email will require a new verification code.")
         return
-    st.info("Verify this email before submitting the booking. The code expires in 10 minutes.")
+    st.warning("Required: verify this email before continuing to the hotel. The code expires in 10 minutes.")
+    field_error("email_verification")
     if st.button("Send email verification code", disabled=not email, key="send_registration_email_code"):
         reply = request_registration_email_code(email)
         if reply.get("ok"):
@@ -951,7 +956,7 @@ def render_registration_email_verification() -> None:
             st.error(reply.get("error", "The verification code could not be sent."))
     if st.session_state.get("registration_email_code_requested"):
         code = st.text_input("Email verification code", max_chars=8, key="registration_email_code")
-        if st.button("Verify email", type="primary", disabled=len(code.strip()) != 8,
+        if st.button("Verify email (required)", type="primary", disabled=len(code.strip()) != 8,
                      key="verify_registration_email_code"):
             reply = verify_registration_email_code(email, code)
             if reply.get("ok"):
@@ -1160,7 +1165,10 @@ def live_room_availability() -> tuple[dict[str, int], str]:
 
 def validate_page(page):
     if page == "Personal":
-        return validate_personal_fields(booking_from_state())
+        errors = validate_personal_fields(booking_from_state())
+        if not st.session_state.edit_context and not registration_email_is_verified():
+            errors["email_verification"] = "Email verification is required before continuing."
+        return errors
     if page == "Hotel":
         raw = booking_from_state()
         errors = validate_hotel_fields(raw)
@@ -1781,11 +1789,7 @@ elif page == "Complete":
             if not backend_is_configured():
                 st.warning("The booking service is not configured.")
             editing = st.session_state.edit_context
-            email_verified = bool(editing or (
-                current_registration_email()
-                and current_registration_email() == st.session_state.get("registration_email_verified", "")
-                and st.session_state.get("registration_email_token")
-            ))
+            email_verified = bool(editing or registration_email_is_verified())
             if editing:
                 st.info("Saving changes updates your existing request, checks room availability, and issues a revised EUR PDF. It does not create another booking.")
             elif not email_verified:
