@@ -713,15 +713,23 @@ def render_invoice_maintenance() -> None:
     with st.form("invoice_admin_email_correction"):
         corrected = st.text_input("Correct email", value=booking.get("email", ""), max_chars=254)
         confirmation = st.text_input("Type CORRECT EMAIL to confirm an email change")
-        update = st.form_submit_button("Correct saved email", disabled=confirmation.strip() != "CORRECT EMAIL")
+        # Streamlit forms do not rerun while a user types. Disabling the submit
+        # button from a value inside the same form would therefore leave it
+        # permanently disabled. Validate the confirmation after submission.
+        update = st.form_submit_button("Correct saved email")
     if update:
-        changed = admin_update_booking_email(booking["booking_id"], corrected, booking.get("email", ""))
-        if changed.get("ok"):
-            st.success(changed.get("message", "Email corrected."))
-            st.session_state.invoice_admin_booking = admin_load_booking(booking["booking_id"])
-            st.rerun()
+        if confirmation.strip() != "CORRECT EMAIL":
+            st.error("Type CORRECT EMAIL exactly before correcting the saved email.")
         else:
-            st.error(changed.get("error", "Email could not be corrected."))
+            changed = admin_update_booking_email(booking["booking_id"], corrected, booking.get("email", ""))
+            if changed.get("ok"):
+                st.session_state.invoice_admin_notice = changed.get("message", "Email corrected.")
+                st.session_state.invoice_admin_booking = admin_load_booking(booking["booking_id"])
+                st.rerun()
+            else:
+                st.error(changed.get("error", "Email could not be corrected."))
+    if st.session_state.get("invoice_admin_notice"):
+        st.success(st.session_state.pop("invoice_admin_notice"))
     send_confirmation = st.text_input("Type SEND INVOICE to confirm delivery", key="invoice_admin_send_confirmation")
     if st.button("Generate & Send Invoice", type="primary", use_container_width=True,
                  disabled=send_confirmation.strip() != "SEND INVOICE"):
