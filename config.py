@@ -154,7 +154,7 @@ ROOM_OCCUPANCY = {
 # active overlapping requests. A dash in the source table is represented as 0
 # only when that room type is still present in the current rate catalogue.
 ROOM_INVENTORY = {
-    "Tiba Rose El Golf": {"Single": 30, "Double": 50, "Triple": 100, "Quadruple": 20},
+    "Tiba Rose El Golf": {"Single": 30, "Double": 60, "Triple": 100, "Quadruple": 20},
     "Baron Hotel Cairo": {"Single": 10, "Double": 10, "Triple": 10, "Quadruple": 10},
     "Armor House Hotel, Cairo": {"Single": 7, "Double": 8, "Suite (2 rooms / 4 persons)": 25},
     "Hotel El Forsan": {"Single": 10, "Double": 50, "Triple": 0},
