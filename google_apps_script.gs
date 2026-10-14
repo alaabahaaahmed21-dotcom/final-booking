@@ -61,7 +61,7 @@ const SERVICES = {
 // Current hotel catalogue and official EUR rate per person/night.
 const HOTEL_RATES_EUR = {
   "Tiba Rose El Golf": {
-    "Breakfast": {"Single": 80, "Double": 50, "Triple": 45, "Quadruple": 112},
+    "Breakfast": {"Single": 80, "Double": 60, "Triple": 45, "Quadruple": 112},
     "Half Board": {"Single": 95, "Double": 60, "Triple": 50}
   },
   "Baron Hotel Cairo": {"Breakfast": {"Single": 130, "Double": 75, "Triple": 60}},
