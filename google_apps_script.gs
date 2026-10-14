@@ -61,7 +61,7 @@ const SERVICES = {
 // Current hotel catalogue and official EUR rate per person/night.
 const HOTEL_RATES_EUR = {
   "Tiba Rose El Golf": {
-    "Breakfast": {"Single": 80, "Double": 60, "Triple": 45, "Quadruple": 112},
+    "Breakfast": {"Single": 80, "Double": 50, "Triple": 45, "Quadruple": 112},
     "Half Board": {"Single": 95, "Double": 60, "Triple": 50}
   },
   "Baron Hotel Cairo": {"Breakfast": {"Single": 130, "Double": 75, "Triple": 60}},
@@ -85,7 +85,7 @@ const HOTEL_RATES_EUR = {
 // Remaining stock is derived from overlapping active booking rows, so checkout,
 // cancellation and amendments automatically release/recalculate rooms.
 const ROOM_INVENTORY_CAPACITY = {
-  "Tiba Rose El Golf": {"Single":30,"Double":50,"Triple":100,"Quadruple":20},
+  "Tiba Rose El Golf": {"Single":30,"Double":60,"Triple":100,"Quadruple":20},
   "Baron Hotel Cairo": {"Single":10,"Double":10,"Triple":10,"Quadruple":10},
   "Armor House Hotel, Cairo": {"Single":7,"Double":8,"Suite (2 rooms / 4 persons)":25},
   "Hotel El Forsan": {"Single":10,"Double":50,"Triple":0},
